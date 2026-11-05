@@ -150,3 +150,5 @@ To prompt an LLM using the database:
 1. Run the query with `--format json` or `--format markdown`.
 2. Feed the structured output directly into the context window.
 Because column names are explicit and identifiers are resolved into names (e.g. `starters`, `objectives`, `drop_zones`), models can reason about quests, items, and NPC locations without needing multi-table joins.
+
+> Views (`v_quest_details`, `v_npc_details`, `v_item_sources`, `v_zone_summary`) are for single-row lookups — use base tables + `GROUP BY` for bulk scans.

@@ -8,19 +8,35 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from .database import get_connection, init_db, get_db_stats, rebuild_search_index
+from .database import get_connection, init_db, get_db_stats, rebuild_search_index, ensure_db_exists
 from .importers import import_pfquest, import_questie, import_pfrb
 from .exporters import export_pfquest, export_questie, export_pfrb, export_pfrb_lod_module, export_all_lod_modules
 from .schema import SCHEMA_SQL, FTS_SCHEMA_SQL
 
 
 def _require_existing_db(db_path: str) -> None:
-    if not Path(db_path).is_file():
-        print(f"Error: Database file '{db_path}' not found.", file=sys.stderr)
+    try:
+        ensure_db_exists(db_path)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
+def _esc(value: object) -> str:
+    """Escape pipes so table/markdown cells don't break columns."""
+    if value is None:
+        return ""
+    return str(value).replace("|", "\\|")
+
+
+def _maybe_fresh(db_path: str, args) -> None:
+    """Delete an existing DB file when --fresh is passed (clean re-import)."""
+    if getattr(args, "fresh", False):
+        Path(db_path).unlink(missing_ok=True)
+
+
 def cmd_init(args) -> int:
+    _maybe_fresh(args.db, args)
     conn = init_db(args.db)
     conn.close()
     print(f"Initialized database successfully at: {args.db}")
@@ -28,6 +44,7 @@ def cmd_init(args) -> int:
 
 
 def cmd_import_pfquest(args) -> int:
+    _maybe_fresh(args.db, args)
     conn = init_db(args.db)
     if args.base_src:
         print(f"Importing base pfQuest data from: {args.base_src} with overlay from: {args.src} -> {args.db}")
@@ -50,7 +67,7 @@ def cmd_import_pfquest(args) -> int:
 
 def cmd_export_pfquest(args) -> int:
     _require_existing_db(args.db)
-    conn = get_connection(args.db)
+    conn = get_connection(args.db, create=False)
     print(f"Exporting pfQuest [{args.flavor or 'classic'}] data from: {args.db} -> {args.dest}")
     export_pfquest(conn, args.dest, flavor=args.flavor, locale=args.locale)
     conn.close()
@@ -59,6 +76,7 @@ def cmd_export_pfquest(args) -> int:
 
 
 def cmd_import_pfrb(args) -> int:
+    _maybe_fresh(args.db, args)
     conn = init_db(args.db)
     print(f"Importing pfQuest-Reborn [{args.flavor or 'classic'}] data from: {args.src} -> {args.db}")
     stats = import_pfrb(
@@ -78,7 +96,7 @@ def cmd_import_pfrb(args) -> int:
 
 def cmd_export_pfrb(args) -> int:
     _require_existing_db(args.db)
-    conn = get_connection(args.db)
+    conn = get_connection(args.db, create=False)
     if getattr(args, "lod", False):
         flavor = args.flavor or "vanilla"
         print(f"Exporting pfQuest-Reborn LoD module [{flavor}] from: {args.db} -> {args.dest}")
@@ -109,6 +127,7 @@ def cmd_export_pfrb_all(args) -> int:
 
 
 def cmd_import_questie(args) -> int:
+    _maybe_fresh(args.db, args)
     conn = init_db(args.db)
     print(f"Importing Questie [{args.flavor}] data from: {args.src} -> {args.db}")
     stats = import_questie(args.src, conn, flavor=args.flavor)
@@ -122,7 +141,7 @@ def cmd_import_questie(args) -> int:
 
 def cmd_export_questie(args) -> int:
     _require_existing_db(args.db)
-    conn = get_connection(args.db)
+    conn = get_connection(args.db, create=False)
     print(f"Exporting Questie [{args.flavor}] data from: {args.db} -> {args.dest}")
     export_questie(conn, args.dest, flavor=args.flavor)
     conn.close()
@@ -132,7 +151,7 @@ def cmd_export_questie(args) -> int:
 
 def cmd_stats(args) -> int:
     _require_existing_db(args.db)
-    conn = get_connection(args.db)
+    conn = get_connection(args.db, create=False)
     stats = get_db_stats(conn)
     conn.close()
     print(f"Database statistics for: {args.db}")
@@ -147,7 +166,7 @@ def cmd_stats(args) -> int:
 
 def cmd_query(args) -> int:
     _require_existing_db(args.db)
-    conn = get_connection(args.db)
+    conn = get_connection(args.db, create=False)
     try:
         cur = conn.execute(args.sql)
     except sqlite3.Error as e:
@@ -161,37 +180,47 @@ def cmd_query(args) -> int:
         conn.close()
         return 0
 
-    rows = cur.fetchall()
     col_names = [d[0] for d in cur.description]
     fmt = getattr(args, "format", "table") or "table"
 
     if fmt == "json":
-        data = [dict(zip(col_names, list(r))) for r in rows]
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        print("[", end="")
+        n = 0
+        for r in cur:
+            if n:
+                print(",", end="")
+            print(json.dumps(dict(zip(col_names, list(r))), ensure_ascii=False), end="")
+            n += 1
+        print("]")
     elif fmt == "csv":
         out = io.StringIO()
         writer = csv.writer(out)
         writer.writerow(col_names)
-        for r in rows:
+        for r in cur:
             writer.writerow(list(r))
         print(out.getvalue(), end="")
     elif fmt == "markdown":
-        if not rows:
+        n = 0
+        for r in cur:
+            if n == 0:
+                print("| " + " | ".join(_esc(c) for c in col_names) + " |")
+                print("| " + " | ".join("---" for _ in col_names) + " |")
+            print("| " + " | ".join(_esc(v) for v in r) + " |")
+            n += 1
+        if n == 0:
             print("No results returned.")
-        else:
-            print("| " + " | ".join(col_names) + " |")
-            print("| " + " | ".join("---" for _ in col_names) + " |")
-            for r in rows:
-                print("| " + " | ".join(str(val) if val is not None else "" for val in r) + " |")
     else:  # table
-        if not rows:
+        n = 0
+        for r in cur:
+            if n == 0:
+                print(" | ".join(_esc(c) for c in col_names))
+                print("-+-".join("-" * len(c) for c in col_names))
+            print(" | ".join(_esc(v) if v is not None else "NULL" for v in r))
+            n += 1
+        if n == 0:
             print("No results returned.")
         else:
-            print(" | ".join(col_names))
-            print("-+-".join("-" * len(c) for c in col_names))
-            for r in rows:
-                print(" | ".join(str(val) if val is not None else "NULL" for val in r))
-            print(f"\n({len(rows)} row(s))")
+            print(f"\n({n} row(s))")
 
     conn.close()
     return 0
@@ -199,7 +228,13 @@ def cmd_query(args) -> int:
 
 def cmd_search(args) -> int:
     _require_existing_db(args.db)
-    conn = get_connection(args.db)
+    conn = get_connection(args.db, create=False)
+    try:
+        raw = getattr(args, "limit", 20)
+        limit = 20 if raw is None else int(raw)
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(200, limit))
     sql = """
         SELECT entity_type, entity_id, name, extra_text, rank
         FROM search_index
@@ -210,46 +245,56 @@ def cmd_search(args) -> int:
         sql += " AND entity_type = ?"
         params.append(args.type)
     sql += " ORDER BY rank LIMIT ?"
-    params.append(args.limit)
+    params.append(limit)
 
     try:
         cur = conn.execute(sql, params)
-        rows = cur.fetchall()
     except sqlite3.OperationalError as e:
-        print(f"Search error: {e}. Try running 'pfquest-db rebuild-index --db {args.db}' first.", file=sys.stderr)
+        msg = str(e).lower()
         conn.close()
+        if "no such table" in msg:
+            print(f"Search error: {e}. Try running 'pfquest-db rebuild-index --db {args.db}' first.", file=sys.stderr)
+        else:
+            print(f"Search error: {e}. Check FTS5 query syntax (e.g. quote phrases: '\"word1 word2\"').", file=sys.stderr)
         return 1
 
     fmt = getattr(args, "format", "table") or "table"
     col_names = ["type", "id", "name", "snippet"]
-    formatted_rows = [
-        [r[0], r[1], r[2], (r[3][:60] + "...") if len(r[3] or "") > 60 else (r[3] or "")]
-        for r in rows
-    ]
+
+    def _snippet(r):
+        text = r[3] or ""
+        return (text[:60] + "...") if len(text) > 60 else text
 
     if fmt == "json":
         data = [
             {"type": r[0], "id": r[1], "name": r[2], "details": r[3]}
-            for r in rows
+            for r in cur
         ]
         print(json.dumps(data, indent=2, ensure_ascii=False))
+        n = len(data)
     elif fmt == "markdown":
-        if not formatted_rows:
+        n = 0
+        for r in cur:
+            if n == 0:
+                print("| " + " | ".join(col_names) + " |")
+                print("| " + " | ".join("---" for _ in col_names) + " |")
+            row = [r[0], r[1], r[2], _snippet(r)]
+            print("| " + " | ".join(_esc(v) for v in row) + " |")
+            n += 1
+        if n == 0:
             print("No matches found.")
-        else:
-            print("| " + " | ".join(col_names) + " |")
-            print("| " + " | ".join("---" for _ in col_names) + " |")
-            for r in formatted_rows:
-                print("| " + " | ".join(str(val) for val in r) + " |")
     else:
-        if not formatted_rows:
+        n = 0
+        for r in cur:
+            if n == 0:
+                print(f"{'Type':<8} {'ID':<8} {'Name':<35} Details")
+                print("-" * 75)
+            print(f"{_esc(r[0]):<8} {_esc(r[1]):<8} {_esc(str(r[2])[:34]):<35} {_esc(_snippet(r))}")
+            n += 1
+        if n == 0:
             print("No matches found.")
         else:
-            print(f"{'Type':<8} {'ID':<8} {'Name':<35} Details")
-            print("-" * 75)
-            for r in formatted_rows:
-                print(f"{r[0]:<8} {r[1]:<8} {str(r[2])[:34]:<35} {r[3]}")
-            print(f"\n({len(rows)} result(s))")
+            print(f"\n({n} result(s))")
 
     conn.close()
     return 0
@@ -257,7 +302,7 @@ def cmd_search(args) -> int:
 
 def cmd_rebuild_index(args) -> int:
     _require_existing_db(args.db)
-    conn = get_connection(args.db)
+    conn = get_connection(args.db, create=False)
     print(f"Rebuilding FTS5 search index on: {args.db} ...")
     count = rebuild_search_index(conn)
     conn.close()
@@ -280,6 +325,7 @@ def main(argv=None) -> int:
     # init
     p_init = subparsers.add_parser("init", help="Initialize a new SQLite database with schema and views")
     p_init.add_argument("--db", required=True, help="Path to output .db file")
+    p_init.add_argument("--fresh", action="store_true", help="Delete existing DB file before init")
     p_init.set_defaults(func=cmd_init)
 
     # import-pfquest
@@ -287,6 +333,7 @@ def main(argv=None) -> int:
     p_imp_pfq.add_argument("--src", required=True, help="Path to pfQuest addon root directory")
     p_imp_pfq.add_argument("--base-src", default=None, help="Optional path to base pfQuest addon directory (e.g. pfQuest-Reforged) to merge before overlay")
     p_imp_pfq.add_argument("--db", required=True, help="Path to target SQLite database")
+    p_imp_pfq.add_argument("--fresh", action="store_true", help="Delete existing DB file before import")
     p_imp_pfq.add_argument("--flavor", default="epoch", help="pfQuest flavor ('epoch', 'wotlk', 'tbc', or '' for classic)")
     p_imp_pfq.add_argument("--locale", default="enUS", help="Locale folder name (default: enUS)")
     p_imp_pfq.set_defaults(func=cmd_import_pfquest)
@@ -304,6 +351,7 @@ def main(argv=None) -> int:
     p_imp_pfrb.add_argument("--src", required=True, help="Path to pfQuest-Reborn addon root directory")
     p_imp_pfrb.add_argument("--base-src", default=None, help="Optional path to base addon directory to merge before overlay")
     p_imp_pfrb.add_argument("--db", required=True, help="Path to target SQLite database")
+    p_imp_pfrb.add_argument("--fresh", action="store_true", help="Delete existing DB file before import")
     p_imp_pfrb.add_argument("--flavor", default="", help="Flavor suffix (default: '' for classic)")
     p_imp_pfrb.add_argument("--locale", default="enUS", help="Locale folder name (default: enUS)")
     p_imp_pfrb.set_defaults(func=cmd_import_pfrb)
@@ -328,6 +376,7 @@ def main(argv=None) -> int:
     p_imp_qst = subparsers.add_parser("import-questie", help="Import Questie Lua database into SQLite")
     p_imp_qst.add_argument("--src", required=True, help="Path to Questie Database folder")
     p_imp_qst.add_argument("--db", required=True, help="Path to target SQLite database")
+    p_imp_qst.add_argument("--fresh", action="store_true", help="Delete existing DB file before import")
     p_imp_qst.add_argument("--flavor", default="wotlk", help="Questie database flavor prefix (e.g. wotlk)")
     p_imp_qst.set_defaults(func=cmd_import_questie)
 
@@ -355,7 +404,7 @@ def main(argv=None) -> int:
     p_search.add_argument("--db", required=True, help="Path to SQLite database")
     p_search.add_argument("query", help="Search keyword(s) or FTS5 expression")
     p_search.add_argument("--type", choices=["quest", "unit", "item", "object"], default=None, help="Filter by entity type")
-    p_search.add_argument("--limit", type=int, default=25, help="Maximum number of results (default: 25)")
+    p_search.add_argument("--limit", type=int, default=20, help="Maximum number of results 1-200 (default: 20)")
     p_search.add_argument("--format", choices=["table", "json", "markdown"], default="table", help="Output format (default: table)")
     p_search.set_defaults(func=cmd_search)
 

@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS quest_objectives (
 );
 
 -- Quest Prerequisites
+-- shortcut: no FK on pre_quest_id/exclusive_quest_id: source data has dangling refs; enforcing breaks imports. Add FKs once importer backfills placeholder quests.
 CREATE TABLE IF NOT EXISTS quest_prerequisites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
@@ -177,7 +178,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 -- Minimap area scaling
 CREATE TABLE IF NOT EXISTS minimap (
-    zone_id INTEGER PRIMARY KEY,
+    zone_id INTEGER PRIMARY KEY REFERENCES zones(id),
     x_scale REAL NOT NULL,
     y_scale REAL NOT NULL
 );
@@ -229,6 +230,8 @@ SELECT
     q.description
 FROM quests q;
 
+-- NOTE: v_quest_details uses correlated subqueries: fast for single-row lookups
+-- (WHERE quest_id = ?), slow for full scans; bulk readers use base tables + GROUP BY.
 DROP VIEW IF EXISTS v_quest_details;
 CREATE VIEW v_quest_details AS
 SELECT 
@@ -297,6 +300,7 @@ LEFT JOIN units u ON qo.objective_type = 'unit' AND qo.target_id = u.id
 LEFT JOIN items i ON qo.objective_type IN ('item', 'itemreq') AND qo.target_id = i.id
 LEFT JOIN objects o ON qo.objective_type = 'object' AND qo.target_id = o.id;
 
+-- NOTE: v_npc_details uses correlated subqueries: fast for single-row lookups, slow for full scans; bulk readers use base tables + GROUP BY.
 DROP VIEW IF EXISTS v_npc_details;
 CREATE VIEW v_npc_details AS
 SELECT 
@@ -322,6 +326,7 @@ SELECT
      WHERE qf.finisher_type = 'unit' AND qf.finisher_id = u.id) AS quests_ended
 FROM units u;
 
+-- NOTE: v_item_sources uses a correlated subquery (drop_zones): fast for single-row lookups, slow for full scans; bulk readers use base tables + GROUP BY.
 DROP VIEW IF EXISTS v_item_sources;
 CREATE VIEW v_item_sources AS
 SELECT 
@@ -346,6 +351,7 @@ JOIN item_drops d ON i.id = d.item_id
 LEFT JOIN units u ON d.source_type = 'unit' AND d.source_id = u.id
 LEFT JOIN objects o ON d.source_type = 'object' AND d.source_id = o.id;
 
+-- NOTE: v_zone_summary uses correlated subqueries: fast for single-row lookups, slow for full scans; bulk readers use base tables + GROUP BY.
 DROP VIEW IF EXISTS v_zone_summary;
 CREATE VIEW v_zone_summary AS
 SELECT 
@@ -422,14 +428,8 @@ def init_database(conn) -> None:
 
 def rebuild_search_index(conn) -> int:
     """Rebuild the FTS5 search index from all core tables."""
+    conn.executescript(FTS_SCHEMA_SQL)
     conn.executescript("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-            entity_type UNINDEXED,
-            entity_id UNINDEXED,
-            name,
-            extra_text,
-            tokenize = 'porter unicode61'
-        );
         DELETE FROM search_index;
 
         INSERT INTO search_index(entity_type, entity_id, name, extra_text)

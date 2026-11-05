@@ -2,18 +2,7 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Optional
-
-
-def _lua_str(s: str) -> str:
-    s = (
-        s.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-    return f'"{s}"'
+from pfquest_db._lua import _lua_str
 
 
 def _serialize_compact(val) -> str:
@@ -38,15 +27,6 @@ def _serialize_compact(val) -> str:
             items.append(f"{k_str}={_serialize_compact(v)}")
         return "{" + ",".join(items) + "}"
     return "nil"
-
-
-def _clean_sparse_list(lst: Optional[list]) -> Optional[list]:
-    if not lst or not any(lst):
-        return None
-    cleaned = [x if x else None for x in lst]
-    while cleaned and cleaned[-1] is None:
-        cleaned.pop()
-    return cleaned if cleaned else None
 
 
 def _trim_trailing_nils(arr: list) -> list:
@@ -74,14 +54,14 @@ def export_questie(
     cur = conn.execute("SELECT unit_id, zone_id, x, y FROM unit_spawns ORDER BY unit_id, id")
     spawns: dict[int, dict[int, list[list[float]]]] = {}
     for uid, zid, x, y in cur.fetchall():
-        spawns.setdefault(uid, {}).setdefault(zid, []).append([round(x, 2), round(y, 2)])
+        spawns.setdefault(uid, {}).setdefault(zid, []).append([x, y])
 
-    cur = conn.execute("SELECT quest_id, starter_id FROM quest_starters WHERE starter_type = 'unit' ORDER BY starter_id")
+    cur = conn.execute("SELECT quest_id, starter_id FROM quest_starters WHERE starter_type = 'unit' ORDER BY starter_id, quest_id")
     quest_starts: dict[int, list[int]] = {}
     for qid, uid in cur.fetchall():
         quest_starts.setdefault(uid, []).append(qid)
 
-    cur = conn.execute("SELECT quest_id, finisher_id FROM quest_finishers WHERE finisher_type = 'unit' ORDER BY finisher_id")
+    cur = conn.execute("SELECT quest_id, finisher_id FROM quest_finishers WHERE finisher_type = 'unit' ORDER BY finisher_id, quest_id")
     quest_ends: dict[int, list[int]] = {}
     for qid, uid in cur.fetchall():
         quest_ends.setdefault(uid, []).append(qid)
@@ -127,14 +107,14 @@ def export_questie(
     cur = conn.execute("SELECT object_id, zone_id, x, y FROM object_spawns ORDER BY object_id, id")
     obj_spawns: dict[int, dict[int, list[list[float]]]] = {}
     for oid, zid, x, y in cur.fetchall():
-        obj_spawns.setdefault(oid, {}).setdefault(zid, []).append([round(x, 2), round(y, 2)])
+        obj_spawns.setdefault(oid, {}).setdefault(zid, []).append([x, y])
 
-    cur = conn.execute("SELECT quest_id, starter_id FROM quest_starters WHERE starter_type = 'object' ORDER BY starter_id")
+    cur = conn.execute("SELECT quest_id, starter_id FROM quest_starters WHERE starter_type = 'object' ORDER BY starter_id, quest_id")
     obj_starts: dict[int, list[int]] = {}
     for qid, oid in cur.fetchall():
         obj_starts.setdefault(oid, []).append(qid)
 
-    cur = conn.execute("SELECT quest_id, finisher_id FROM quest_finishers WHERE finisher_type = 'object' ORDER BY finisher_id")
+    cur = conn.execute("SELECT quest_id, finisher_id FROM quest_finishers WHERE finisher_type = 'object' ORDER BY finisher_id, quest_id")
     obj_ends: dict[int, list[int]] = {}
     for qid, oid in cur.fetchall():
         obj_ends.setdefault(oid, []).append(qid)
@@ -165,7 +145,7 @@ def export_questie(
     )
     item_rows = cur.fetchall()
 
-    cur = conn.execute("SELECT item_id, source_type, source_id FROM item_drops ORDER BY item_id")
+    cur = conn.execute("SELECT item_id, source_type, source_id FROM item_drops ORDER BY item_id, source_type, source_id")
     npc_drops: dict[int, list[int]] = {}
     object_drops: dict[int, list[int]] = {}
     for iid, stype, sid in cur.fetchall():
@@ -174,12 +154,12 @@ def export_questie(
         elif stype == "object":
             object_drops.setdefault(iid, []).append(sid)
 
-    cur = conn.execute("SELECT item_id, unit_id FROM item_vendors ORDER BY item_id")
+    cur = conn.execute("SELECT item_id, unit_id FROM item_vendors ORDER BY item_id, unit_id")
     item_vendors: dict[int, list[int]] = {}
     for iid, uid in cur.fetchall():
         item_vendors.setdefault(iid, []).append(uid)
 
-    cur = conn.execute("SELECT quest_id, starter_id FROM quest_starters WHERE starter_type = 'item' ORDER BY starter_id")
+    cur = conn.execute("SELECT quest_id, starter_id FROM quest_starters WHERE starter_type = 'item' ORDER BY starter_id, quest_id")
     item_starts: dict[int, int] = {}
     for qid, iid in cur.fetchall():
         item_starts[iid] = qid
@@ -307,13 +287,16 @@ def export_questie(
             ) = r
 
             # Starters: {[1]=creatures, [2]=objects, [3]=items}
-            st = _clean_sparse_list(starters.get(qid))
+            _st = starters.get(qid)
+            st = _trim_trailing_nils([x or None for x in _st]) if _st and any(_st) else None
 
             # Finishers: {[1]=creatures, [2]=objects}
-            fin = _clean_sparse_list(finishers.get(qid))
+            _fin = finishers.get(qid)
+            fin = _trim_trailing_nils([x or None for x in _fin]) if _fin and any(_fin) else None
 
             # Objectives: {[1]=creatures, [2]=objects, [3]=items}
-            objs = _clean_sparse_list(objectives.get(qid))
+            _objs = objectives.get(qid)
+            objs = _trim_trailing_nils([x or None for x in _objs]) if _objs and any(_objs) else None
 
             # Skill
             req_skill = [sk_id, sk_val if sk_val is not None else 1] if sk_id is not None else None

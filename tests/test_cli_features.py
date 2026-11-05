@@ -1,44 +1,86 @@
-"""Tests for CLI formatting and search command."""
-
 import json
+
+import pytest
+from pathlib import Path
 from pfquest_db.cli import main
-from pfquest_db.database import init_db, rebuild_search_index
+from pfquest_db.database import get_connection
 
 
-def test_cli_query_formats(tmp_path, capsys):
-    db_file = tmp_path / "cli_test.db"
-    conn = init_db(db_file)
-    conn.execute("INSERT INTO zones (id, name, map_id) VALUES (1, 'Durotar', 14);")
+def _seed_db(db_path: str, names) -> None:
+    assert main(["init", "--db", db_path]) == 0
+    conn = get_connection(db_path)
+    for i, name in enumerate(names, start=1):
+        conn.execute(
+            "INSERT INTO units (id, name, min_level) VALUES (?, ?, ?)",
+            (i, name, 10),
+        )
     conn.commit()
     conn.close()
-
-    # Test JSON output
-    ret = main(["query", "--db", str(db_file), "SELECT id, name FROM zones", "--format", "json"])
-    assert ret == 0
-    captured = capsys.readouterr()
-    data = json.loads(captured.out)
-    assert len(data) == 1
-    assert data[0]["name"] == "Durotar"
-
-    # Test Markdown output
-    ret = main(["query", "--db", str(db_file), "SELECT id, name FROM zones", "--format", "markdown"])
-    assert ret == 0
-    captured = capsys.readouterr()
-    assert "| id | name |" in captured.out
-    assert "| 1 | Durotar |" in captured.out
+    assert main(["rebuild-index", "--db", db_path]) == 0
 
 
-def test_cli_search_command(tmp_path, capsys):
-    db_file = tmp_path / "search_test.db"
-    conn = init_db(db_file)
-    conn.execute("INSERT INTO quests (id, title, description) VALUES (10, 'Find Mankrik', 'Help Mankrik find his wife.');")
+def test_search_limit_clamp(tmp_path, capsys):
+    db = str(tmp_path / "limit.db")
+    _seed_db(db, ["Clamp Test One", "Clamp Test Two", "Clamp Test Three"])
+    capsys.readouterr()
+    # 0 clamps to 1
+    assert main(["search", "--db", db, "Clamp", "--limit", "0"]) == 0
+    assert "(1 result(s))" in capsys.readouterr().out
+    # huge clamps to 200; only 3 rows exist so all 3 still show
+    assert main(["search", "--db", db, "Clamp", "--limit", "9999"]) == 0
+    assert "(3 result(s))" in capsys.readouterr().out
+
+
+def test_missing_db_fails_fast_without_creating(tmp_path, capsys):
+    missing = str(tmp_path / "nope.db")
+    with pytest.raises(SystemExit) as e:
+        main(["query", "--db", missing, "SELECT 1"])
+    assert e.value.code == 1
+    assert "DB not found" in capsys.readouterr().err
+    assert not Path(missing).exists()
+    with pytest.raises(SystemExit) as e2:
+        main(["search", "--db", missing, "foo"])
+    assert e2.value.code == 1
+    assert not Path(missing).exists()
+
+
+def test_pipe_escape_markdown_and_table(tmp_path, capsys):
+    db = str(tmp_path / "pipe.db")
+    _seed_db(db, ["A|B"])
+    capsys.readouterr()
+    assert main(["query", "--db", db, "SELECT name FROM units", "--format", "markdown"]) == 0
+    assert "A\\|B" in capsys.readouterr().out
+    assert main(["query", "--db", db, "SELECT name FROM units", "--format", "table"]) == 0
+    assert "A\\|B" in capsys.readouterr().out
+
+
+def test_query_streaming_json_correct(tmp_path, capsys):
+    db = str(tmp_path / "stream.db")
+    assert main(["init", "--db", db]) == 0
+    conn = get_connection(db)
+    conn.executemany(
+        "INSERT INTO units (id, name, min_level) VALUES (?, ?, ?)",
+        [(i, f"Mob {i}", i) for i in range(1, 51)],
+    )
     conn.commit()
-    rebuild_search_index(conn)
     conn.close()
+    capsys.readouterr()
+    assert main(["query", "--db", db, "SELECT id, name FROM units ORDER BY id", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert len(data) == 50
+    assert data[0]["name"] == "Mob 1"
+    assert data[-1]["name"] == "Mob 50"
 
-    ret = main(["search", "--db", str(db_file), "Mankrik", "--format", "json"])
-    assert ret == 0
-    captured = capsys.readouterr()
-    results = json.loads(captured.out)
-    assert len(results) == 1
-    assert results[0]["name"] == "Find Mankrik"
+
+def test_fresh_flag_reinits(tmp_path, capsys):
+    db = str(tmp_path / "fresh.db")
+    assert main(["init", "--db", db]) == 0
+    conn = get_connection(db)
+    conn.execute("INSERT INTO units (id, name, min_level) VALUES (1, 'X', 1)")
+    conn.commit()
+    conn.close()
+    capsys.readouterr()
+    assert main(["init", "--db", db, "--fresh"]) == 0
+    conn = get_connection(db)
+    assert conn.execute("SELECT COUNT(*) FROM units").fetchone()[0] == 0
+    conn.close()

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..lua_bridge import iter_lua_table_entries
+from .pfquest import _backfill_quest_refs, _check_names, _int_entries
 
 
 QUESTIE_PRE_CODE = """
@@ -61,8 +62,7 @@ def _iter_spawns(spawns: Any):
                     if isinstance(pt, list) and len(pt) >= 2:
                         try:
                             x, y = float(pt[0]), float(pt[1])
-                            if x >= 0 and y >= 0:
-                                yield zid, x, y
+                            yield zid, x, y
                         except (ValueError, TypeError):
                             pass
     elif isinstance(spawns, list):
@@ -73,10 +73,34 @@ def _iter_spawns(spawns: Any):
                     if isinstance(pt, list) and len(pt) >= 2:
                         try:
                             x, y = float(pt[0]), float(pt[1])
-                            if x >= 0 and y >= 0:
-                                yield zid, x, y
+                            yield zid, x, y
                         except (ValueError, TypeError):
                             pass
+
+
+def _id_amount_list(val) -> list[tuple[int, int]]:
+    """Extract (id, amount) pairs from flat, nested, or tuple lists; plain ids default amount to 0."""
+    if val is None:
+        return []
+    if isinstance(val, (int, float)):
+        return [(int(val), 0)]
+    if isinstance(val, dict):
+        val = list(val.values())
+    if not isinstance(val, list):
+        return []
+    res = []
+    for item in val:
+        if isinstance(item, (int, float)):
+            res.append((int(item), 0))
+        elif isinstance(item, list) and item and isinstance(item[0], (int, float)):
+            amt = item[1] if len(item) > 1 and isinstance(item[1], (int, float)) else 0
+            res.append((int(item[0]), int(amt)))
+        elif isinstance(item, dict):
+            first = _get_field(item, 1)
+            if isinstance(first, (int, float)):
+                second = _get_field(item, 2)
+                res.append((int(first), int(second) if isinstance(second, (int, float)) else 0))
+    return res
 
 
 def import_questie(
@@ -89,6 +113,8 @@ def import_questie(
     base_dir can be the directory containing wotlkQuestDB.lua (e.g. Questie/Database/Wotlk)
     or the parent Questie/Database directory.
     """
+    if re.fullmatch(r"[A-Za-z0-9]*", flavor) is None:
+        raise ValueError(f"refusing unsafe flavor: {flavor!r}")
     base_path = Path(base_dir)
     if (base_path / "Wotlk").exists():
         target_dir = base_path / "Wotlk"
@@ -99,6 +125,11 @@ def import_questie(
     else:
         target_dir = base_path
         parent_dir = base_path
+
+    _cands = [target_dir / f"{flavor}{n}" for n in ("NpcDB.lua", "ObjectDB.lua", "ItemDB.lua", "QuestDB.lua")]
+    _cands += [target_dir / n for n in ("npcDB.lua", "objectDB.lua", "itemDB.lua", "questDB.lua")]
+    if not any(p.exists() for p in _cands):
+        raise FileNotFoundError(f"no Questie Lua files for flavor={flavor!r} under {base_path}")
 
     stats = {
         "zones": 0,
@@ -150,7 +181,7 @@ def import_questie(
     unit_spawn_rows = []
     if npc_file.exists():
         expr = "assert(loadstring(QuestieDB.npcData))()"
-        for uid, ndata in iter_lua_table_entries(npc_file, expr, QUESTIE_PRE_CODE):
+        for uid, ndata in _int_entries(iter_lua_table_entries(npc_file, expr, QUESTIE_PRE_CODE), "unit"):
             if not isinstance(ndata, (list, dict)):
                 continue
             uid_int = int(uid)
@@ -216,7 +247,7 @@ def import_questie(
     obj_spawn_rows = []
     if obj_file.exists():
         expr = "assert(loadstring(QuestieDB.objectData))()"
-        for oid, odata in iter_lua_table_entries(obj_file, expr, QUESTIE_PRE_CODE):
+        for oid, odata in _int_entries(iter_lua_table_entries(obj_file, expr, QUESTIE_PRE_CODE), "object"):
             if not isinstance(odata, (list, dict)):
                 continue
             oid_int = int(oid)
@@ -273,7 +304,7 @@ def import_questie(
     vendor_rows = []
     if item_file.exists():
         expr = "assert(loadstring(QuestieDB.itemData))()"
-        for iid, idata in iter_lua_table_entries(item_file, expr, QUESTIE_PRE_CODE):
+        for iid, idata in _int_entries(iter_lua_table_entries(item_file, expr, QUESTIE_PRE_CODE), "item"):
             if not isinstance(idata, (list, dict)):
                 continue
             iid_int = int(iid)
@@ -370,7 +401,7 @@ def import_questie(
 
     if quest_file.exists():
         expr = "assert(loadstring(QuestieDB.questData))()"
-        for qid, qdata in iter_lua_table_entries(quest_file, expr, QUESTIE_PRE_CODE):
+        for qid, qdata in _int_entries(iter_lua_table_entries(quest_file, expr, QUESTIE_PRE_CODE), "quest"):
             if not isinstance(qdata, (list, dict)):
                 continue
             qid_int = int(qid)
@@ -451,17 +482,17 @@ def import_questie(
             # Objectives (index 10): {[1]=creatures, [2]=objects, [3]=items, ...}
             objectives = _get_field(qdata, 10)
             if objectives:
-                for item in _id_list(_get_field(objectives, 1)):
-                    objective_rows.append((qid_int, "unit", item, 0, None, None))
-                for item in _id_list(_get_field(objectives, 2)):
-                    objective_rows.append((qid_int, "object", item, 0, None, None))
-                for item in _id_list(_get_field(objectives, 3)):
-                    objective_rows.append((qid_int, "item", item, 0, None, None))
+                for item, amt in _id_amount_list(_get_field(objectives, 1)):
+                    objective_rows.append((qid_int, "unit", item, amt, None, None))
+                for item, amt in _id_amount_list(_get_field(objectives, 2)):
+                    objective_rows.append((qid_int, "object", item, amt, None, None))
+                for item, amt in _id_amount_list(_get_field(objectives, 3)):
+                    objective_rows.append((qid_int, "item", item, amt, None, None))
 
             # requiredSourceItems (index 21)
-            req_items = _id_list(_get_field(qdata, 21))
-            for iid in req_items:
-                objective_rows.append((qid_int, "itemreq", iid, 0, None, None))
+            req_items = _id_amount_list(_get_field(qdata, 21))
+            for iid, amt in req_items:
+                objective_rows.append((qid_int, "itemreq", iid, amt, None, None))
 
             # Prerequisites: preQuestSingle (index 13), preQuestGroup (index 12)
             pre_single = _id_list(_get_field(qdata, 13))
@@ -510,6 +541,12 @@ def import_questie(
             )
             stats["quests"] = len(quest_rows)
 
+        _backfill_quest_refs(conn, [r[0] for r in unit_rows], [r[0] for r in obj_rows],
+                               [r[0] for r in item_rows], [r[0] for r in quest_rows],
+                               starter_rows, finisher_rows, objective_rows, drop_rows, vendor_rows,
+                               prereq_rows, exclusive_rows,
+                               [r[8] for r in quest_rows if isinstance(r[8], int)])
+
         if starter_rows:
             conn.executemany(
                 """
@@ -554,6 +591,7 @@ def import_questie(
                 """,
                 exclusive_rows,
             )
+
 
     conn.commit()
     return stats

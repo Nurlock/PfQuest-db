@@ -54,7 +54,7 @@ def test_pfrb_roundtrip(tmp_path: Path):
     assert stats["items"] == 1
     assert stats["item_drops"] == 1
     assert stats["item_vendors"] == 1
-    assert stats["quests"] == 1
+    assert stats["quests"] == 2  # 1 real + 1 placeholder for pre_quest 399
 
     # Verify values match exactly
     u = conn2.execute("SELECT id, name, min_level, max_level, rank, faction FROM units WHERE id = 100").fetchone()

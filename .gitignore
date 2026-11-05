@@ -9,11 +9,17 @@ wheels/
 # Virtual environments
 .venv
 
-# SQLite WAL and temp files
+# SQLite databases (generated artifacts, keep local copies out of git)
+*.db
 *.db-journal
 *.db-wal
 *.db-shm
 reborn.db
+epoch.db
+ref/*.db
 
 # Test caches
 .pytest_cache/
+
+# Pix Agent
+.pi/

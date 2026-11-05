@@ -8,7 +8,11 @@ from ..lua_bridge import iter_lua_table_entries
 from .pfquest import (
     PRE_CODE_TEMPLATE,
     _as_list,
+    _backfill_quest_refs,
+    _check_names,
+    _int_entries,
     _parse_level_range,
+    _warn,
     apply_pfquest_overwrites,
 )
 
@@ -93,6 +97,8 @@ def import_pfrb(
         "professions": 0,
     }
 
+    _check_names(flavor, locale)
+
     if base_src:
         base_stats = import_pfrb(conn, base_src, flavor="", locale=locale, base_src=None)
         for k, v in base_stats.items():
@@ -104,6 +110,11 @@ def import_pfrb(
 
     data_dir = base_path / "db"
     loc_dir = data_dir / locale
+    _core_files = [loc_dir / f"{c}{loc_suffix}.lua" for c in ("zones", "units", "objects", "items", "quests")]
+    _core_files += [data_dir / f"{c}{suffix}.lua" for c in ("zones", "units", "objects", "items", "quests")]
+    if not any(f.exists() for f in _core_files):
+        raise FileNotFoundError(f"no pfQuest-Reborn Lua files for flavor={flavor!r} locale={locale!r} under {base_path}")
+
 
     # 1. Zones
     zone_names: dict[int, str] = {}
@@ -111,7 +122,7 @@ def import_pfrb(
     if zone_loc_file.exists():
         loc_key = f"{locale}{loc_suffix}"
         expr = f'pfDB["zones"]["{loc_key}"] or pfDB["zones"]["{locale}"]'
-        for zid, name in iter_lua_table_entries(zone_loc_file, expr, PRE_CODE_TEMPLATE):
+        for zid, name in _int_entries(iter_lua_table_entries(zone_loc_file, expr, PRE_CODE_TEMPLATE), "zone"):
             zone_names[int(zid)] = str(name)
 
     zone_data_file = data_dir / f"zones{suffix}.lua"
@@ -119,7 +130,7 @@ def import_pfrb(
     if zone_data_file.exists():
         data_key = f"data{suffix}"
         expr = f'pfDB["zones"]["{data_key}"] or pfDB["zones"]["data"]'
-        for zid, d in iter_lua_table_entries(zone_data_file, expr, PRE_CODE_TEMPLATE):
+        for zid, d in _int_entries(iter_lua_table_entries(zone_data_file, expr, PRE_CODE_TEMPLATE), "zone"):
             zone_data[int(zid)] = d
 
     all_zone_ids = set(zone_names.keys()) | set(zone_data.keys())
@@ -156,7 +167,7 @@ def import_pfrb(
     if unit_loc_file.exists():
         loc_key = f"{locale}{loc_suffix}"
         expr = f'pfDB["units"]["{loc_key}"] or pfDB["units"]["{locale}"]'
-        for uid, name in iter_lua_table_entries(unit_loc_file, expr, PRE_CODE_TEMPLATE):
+        for uid, name in _int_entries(iter_lua_table_entries(unit_loc_file, expr, PRE_CODE_TEMPLATE), "unit"):
             unit_names[int(uid)] = str(name)
 
     unit_data_file = data_dir / f"units{suffix}.lua"
@@ -165,7 +176,7 @@ def import_pfrb(
     if unit_data_file.exists():
         data_key = f"data{suffix}"
         expr = f'pfDB["units"]["{data_key}"] or pfDB["units"]["data"]'
-        for uid, udata in iter_lua_table_entries(unit_data_file, expr, PRE_CODE_TEMPLATE):
+        for uid, udata in _int_entries(iter_lua_table_entries(unit_data_file, expr, PRE_CODE_TEMPLATE), "unit"):
             uid_int = int(uid)
             name = unit_names.get(uid_int)
             min_l, max_l = _parse_level_range(udata.get("lvl") if isinstance(udata, dict) else None)
@@ -182,9 +193,12 @@ def import_pfrb(
                     coord_pts = list(coords.values()) if isinstance(coords, dict) else coords
                     for pt in coord_pts:
                         if isinstance(pt, list) and len(pt) >= 3:
-                            x, y, zone_id = float(pt[0]), float(pt[1]), int(pt[2])
-                            respawn = int(pt[3]) if len(pt) > 3 else 0
-                            spawn_rows.append((uid_int, zone_id, x, y, respawn))
+                            try:
+                                x, y, zone_id = float(pt[0]), float(pt[1]), int(pt[2])
+                                respawn = int(pt[3]) if len(pt) > 3 else 0
+                                spawn_rows.append((uid_int, zone_id, x, y, respawn))
+                            except (ValueError, TypeError):
+                                _warn("unit spawn", pt)
 
     existing_unit_ids = {r[0] for r in unit_rows}
     for uid_int, name in unit_names.items():
@@ -229,7 +243,7 @@ def import_pfrb(
     if obj_loc_file.exists():
         loc_key = f"{locale}{loc_suffix}"
         expr = f'pfDB["objects"]["{loc_key}"] or pfDB["objects"]["{locale}"]'
-        for oid, name in iter_lua_table_entries(obj_loc_file, expr, PRE_CODE_TEMPLATE):
+        for oid, name in _int_entries(iter_lua_table_entries(obj_loc_file, expr, PRE_CODE_TEMPLATE), "object"):
             obj_names[int(oid)] = str(name)
 
     obj_data_file = data_dir / f"objects{suffix}.lua"
@@ -238,7 +252,7 @@ def import_pfrb(
     if obj_data_file.exists():
         data_key = f"data{suffix}"
         expr = f'pfDB["objects"]["{data_key}"] or pfDB["objects"]["data"]'
-        for oid, odata in iter_lua_table_entries(obj_data_file, expr, PRE_CODE_TEMPLATE):
+        for oid, odata in _int_entries(iter_lua_table_entries(obj_data_file, expr, PRE_CODE_TEMPLATE), "object"):
             oid_int = int(oid)
             name = obj_names.get(oid_int)
             fac = odata.get("fac") if isinstance(odata, dict) else None
@@ -253,9 +267,12 @@ def import_pfrb(
                     coord_pts = list(coords.values()) if isinstance(coords, dict) else coords
                     for pt in coord_pts:
                         if isinstance(pt, list) and len(pt) >= 3:
-                            x, y, zone_id = float(pt[0]), float(pt[1]), int(pt[2])
-                            respawn = int(pt[3]) if len(pt) > 3 else 0
-                            obj_spawn_rows.append((oid_int, zone_id, x, y, respawn))
+                            try:
+                                x, y, zone_id = float(pt[0]), float(pt[1]), int(pt[2])
+                                respawn = int(pt[3]) if len(pt) > 3 else 0
+                                obj_spawn_rows.append((oid_int, zone_id, x, y, respawn))
+                            except (ValueError, TypeError):
+                                _warn("object spawn", pt)
 
     existing_obj_ids = {r[0] for r in obj_rows}
     for oid_int, name in obj_names.items():
@@ -297,7 +314,7 @@ def import_pfrb(
     if item_loc_file.exists():
         loc_key = f"{locale}{loc_suffix}"
         expr = f'pfDB["items"]["{loc_key}"] or pfDB["items"]["{locale}"]'
-        for iid, name in iter_lua_table_entries(item_loc_file, expr, PRE_CODE_TEMPLATE):
+        for iid, name in _int_entries(iter_lua_table_entries(item_loc_file, expr, PRE_CODE_TEMPLATE), "item"):
             item_names[int(iid)] = str(name)
 
     item_data_file = data_dir / f"items{suffix}.lua"
@@ -307,7 +324,7 @@ def import_pfrb(
     if item_data_file.exists():
         data_key = f"data{suffix}"
         expr = f'pfDB["items"]["{data_key}"] or pfDB["items"]["data"]'
-        for iid, idata in iter_lua_table_entries(item_data_file, expr, PRE_CODE_TEMPLATE):
+        for iid, idata in _int_entries(iter_lua_table_entries(item_data_file, expr, PRE_CODE_TEMPLATE), "item"):
             iid_int = int(iid)
             name = item_names.get(iid_int)
             item_rows.append((iid_int, name, None, None, None, None, None, None, None, None))
@@ -319,21 +336,30 @@ def import_pfrb(
                         drop_rows.append((iid_int, "unit", uid, chance))
                 elif "U" in idata:
                     for uid, chance in (idata.get("U") or {}).items():
-                        drop_rows.append((iid_int, "unit", int(uid), float(chance)))
+                        try:
+                            drop_rows.append((iid_int, "unit", int(uid), float(chance)))
+                        except (ValueError, TypeError):
+                            _warn("unit drop", (uid, chance))
 
                 if "__O" in idata:
                     for oid, chance in _parse_compact_pairs(idata["__O"]):
                         drop_rows.append((iid_int, "object", oid, chance))
                 elif "O" in idata:
                     for oid, chance in (idata.get("O") or {}).items():
-                        drop_rows.append((iid_int, "object", int(oid), float(chance)))
+                        try:
+                            drop_rows.append((iid_int, "object", int(oid), float(chance)))
+                        except (ValueError, TypeError):
+                            _warn("object drop", (oid, chance))
 
                 if "__V" in idata:
                     for vid, stock in _parse_compact_pairs(idata["__V"]):
                         vendor_rows.append((iid_int, vid, int(stock)))
                 elif "V" in idata:
                     for vid, stock in (idata.get("V") or {}).items():
-                        vendor_rows.append((iid_int, int(vid), int(stock)))
+                        try:
+                            vendor_rows.append((iid_int, int(vid), int(stock)))
+                        except (ValueError, TypeError):
+                            _warn("vendor", (vid, stock))
 
     existing_item_ids = {r[0] for r in item_rows}
     for iid_int, name in item_names.items():
@@ -384,7 +410,7 @@ def import_pfrb(
     if quest_loc_file.exists():
         loc_key = f"{locale}{loc_suffix}"
         expr = f'pfDB["quests"]["{loc_key}"] or pfDB["quests"]["{locale}"]'
-        for qid, qloc in iter_lua_table_entries(quest_loc_file, expr, PRE_CODE_TEMPLATE):
+        for qid, qloc in _int_entries(iter_lua_table_entries(quest_loc_file, expr, PRE_CODE_TEMPLATE), "quest"):
             if isinstance(qloc, dict):
                 quest_locs[int(qid)] = qloc
 
@@ -399,7 +425,7 @@ def import_pfrb(
     if quest_data_file.exists():
         data_key = f"data{suffix}"
         expr = f'pfDB["quests"]["{data_key}"] or pfDB["quests"]["data"]'
-        for qid, qdata in iter_lua_table_entries(quest_data_file, expr, PRE_CODE_TEMPLATE):
+        for qid, qdata in _int_entries(iter_lua_table_entries(quest_data_file, expr, PRE_CODE_TEMPLATE), "quest"):
             qid_int = int(qid)
             qloc = quest_locs.get(qid_int, {})
             title = qloc.get("T")
@@ -595,6 +621,12 @@ def import_pfrb(
     )
     stats["quests"] = len(quest_rows)
 
+    _backfill_quest_refs(conn, {r[0] for r in unit_rows} | vendor_uids,
+                           {r[0] for r in obj_rows}, {r[0] for r in item_rows},
+                           [r[0] for r in quest_rows],
+                           starter_rows, finisher_rows, objective_rows, drop_rows, vendor_rows,
+                           prereq_rows, exclusive_rows, [r[8] for r in quest_rows if r[8] is not None])
+
     conn.executemany(
         """
         INSERT OR IGNORE INTO quest_starters (quest_id, starter_type, starter_id)
@@ -631,13 +663,14 @@ def import_pfrb(
         exclusive_rows,
     )
 
+
     # 6. Area Triggers
     at_file = data_dir / f"areatrigger{suffix}.lua"
     at_rows = []
     if at_file.exists():
         data_key = f"data{suffix}"
         expr = f'pfDB["areatrigger"]["{data_key}"] or pfDB["areatrigger"]["data"]'
-        for at_id, at_data in iter_lua_table_entries(at_file, expr, PRE_CODE_TEMPLATE):
+        for at_id, at_data in _int_entries(iter_lua_table_entries(at_file, expr, PRE_CODE_TEMPLATE), "areatrigger"):
             if isinstance(at_data, dict):
                 if "__c" in at_data:
                     for x, y, zid, _ in _parse_compact_spawns(at_data["__c"]):
@@ -647,7 +680,10 @@ def import_pfrb(
                     coord_pts = list(coords.values()) if isinstance(coords, dict) else coords
                     for pt in coord_pts:
                         if isinstance(pt, list) and len(pt) >= 3:
-                            at_rows.append((int(at_id), None, int(pt[2]), float(pt[0]), float(pt[1])))
+                            try:
+                                at_rows.append((int(at_id), None, int(pt[2]), float(pt[0]), float(pt[1])))
+                            except (ValueError, TypeError):
+                                _warn("areatrigger coord", pt)
     if at_rows:
         at_zones = {r[2] for r in at_rows}
         missing_at_zones = at_zones - all_zone_ids - missing_zones - missing_obj_zones
@@ -674,7 +710,10 @@ def import_pfrb(
         for category, cat_dict in iter_lua_table_entries(meta_file, expr, PRE_CODE_TEMPLATE):
             if isinstance(cat_dict, dict):
                 for eid, val in cat_dict.items():
-                    meta_rows.append((str(category), int(eid), str(val) if val is not None else None))
+                    try:
+                        meta_rows.append((str(category), int(eid), str(val) if val is not None else None))
+                    except (ValueError, TypeError):
+                        _warn("meta entity", eid)
     if meta_rows:
         conn.executemany(
             "INSERT OR REPLACE INTO meta (category, entity_id, value) VALUES (?, ?, ?)",
@@ -688,9 +727,12 @@ def import_pfrb(
     if mini_file.exists():
         mini_key = f"minimap{suffix}"
         expr = f'pfDB["{mini_key}"] or pfDB["minimap"]'
-        for zid, scales in iter_lua_table_entries(mini_file, expr, PRE_CODE_TEMPLATE):
+        for zid, scales in _int_entries(iter_lua_table_entries(mini_file, expr, PRE_CODE_TEMPLATE), "minimap"):
             if isinstance(scales, list) and len(scales) >= 2:
-                mini_rows.append((int(zid), float(scales[0]), float(scales[1])))
+                try:
+                    mini_rows.append((int(zid), float(scales[0]), float(scales[1])))
+                except (ValueError, TypeError):
+                    _warn("minimap scale", (zid, scales))
     if mini_rows:
         conn.executemany(
             "INSERT OR REPLACE INTO minimap (zone_id, x_scale, y_scale) VALUES (?, ?, ?)",
@@ -704,7 +746,7 @@ def import_pfrb(
     if prof_file.exists():
         loc_key = f"{locale}{loc_suffix}"
         expr = f'pfDB["professions"]["{loc_key}"] or pfDB["professions"]["{locale}"]'
-        for pid, name in iter_lua_table_entries(prof_file, expr, PRE_CODE_TEMPLATE):
+        for pid, name in _int_entries(iter_lua_table_entries(prof_file, expr, PRE_CODE_TEMPLATE), "profession"):
             prof_rows.append((int(pid), str(name)))
     if prof_rows:
         conn.executemany(
