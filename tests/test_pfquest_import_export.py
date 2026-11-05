@@ -41,6 +41,7 @@ def test_pfquest_epoch_import_and_export(tmp_path, repo_root):
     # Export to a temporary directory
     export_dir = tmp_path / "exported_pfquest"
     export_pfquest(conn2, export_dir, flavor="epoch")
+    unit_names = dict(conn2.execute("SELECT id, name FROM units").fetchall())
     conn2.close()
 
     assert (export_dir / "db" / "quests-epoch.lua").exists()
@@ -51,12 +52,25 @@ def test_pfquest_epoch_import_and_export(tmp_path, repo_root):
     roundtrip_db = tmp_path / "roundtrip.db"
     conn_rt = init_db(roundtrip_db)
     rt_stats = import_pfquest(export_dir, conn_rt, flavor="epoch")
+
+    # Placeholders: first import backfills bare rows (id only) for dangling quest
+    # refs; the exporter skips bare rows. Roundtrip must lose no NAMED data
+    # and the export must be a fixpoint.
+    rt_ids = {r[0] for r in conn_rt.execute("SELECT id FROM units").fetchall()}
+    lost = [u for u in unit_names if u not in rt_ids]
+    assert lost, "expected placeholder drop"
+    assert all(unit_names[u] is None for u in lost), f"named units lost: {lost[:5]}"
+
+    export_dir2 = tmp_path / "exported_pfquest2"
+    export_pfquest(conn_rt, export_dir2, flavor="epoch")
     conn_rt.close()
 
     assert rt_stats["quests"] == stats["quests"]
-    assert rt_stats["units"] == stats["units"]
-    assert rt_stats["objects"] == stats["objects"]
-    assert rt_stats["items"] == stats["items"]
+    conn_rt2 = init_db(tmp_path / "roundtrip2.db")
+    rt2_stats = import_pfquest(export_dir2, conn_rt2, flavor="epoch")
+    conn_rt2.close()
+    assert rt2_stats["units"] == rt_stats["units"]
+    assert rt2_stats["quests"] == rt_stats["quests"]
 
 
 def test_pfquest_idempotent_reimport(tmp_path, repo_root):

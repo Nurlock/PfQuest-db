@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS quest_objectives (
 );
 
 -- Quest Prerequisites
--- shortcut: no FK on pre_quest_id/exclusive_quest_id: source data has dangling refs; enforcing breaks imports. Add FKs once importer backfills placeholder quests.
+-- shortcut: no FK on pre_quest_id/exclusive_quest_id/minimap.zone_id: source data has dangling refs; enforcing breaks imports. Add FKs once importer backfills placeholders.
 CREATE TABLE IF NOT EXISTS quest_prerequisites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 -- Minimap area scaling
 CREATE TABLE IF NOT EXISTS minimap (
-    zone_id INTEGER PRIMARY KEY REFERENCES zones(id),
+    zone_id INTEGER PRIMARY KEY,
     x_scale REAL NOT NULL,
     y_scale REAL NOT NULL
 );
