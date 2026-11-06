@@ -35,6 +35,23 @@ def _trim_trailing_nils(arr: list) -> list:
     return arr
 
 
+def _questie_zone(zid: int) -> int:
+    # pfQuest encodes dungeon floors as id + (level - 1) * 10000 (see
+    # pfQuest-epoch patchtable.lua); Questie keys spawns by base area id.
+    return zid % 10000 if zid and zid > 10000 else zid
+
+
+def _top_zone(spawn_map: dict[int, dict[int, list]], ids: list[int] | None) -> int | None:
+    """Most-pinned spawn zone for ids; ties break toward the smallest zone id."""
+    counts: dict[int, int] = {}
+    for i in ids or []:
+        for z, pts in (spawn_map.get(i) or {}).items():
+            counts[z] = counts.get(z, 0) + len(pts)
+    if not counts:
+        return None
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
 def export_questie(
     conn: sqlite3.Connection,
     output_dir: str | Path,
@@ -54,7 +71,7 @@ def export_questie(
     cur = conn.execute("SELECT unit_id, zone_id, x, y FROM unit_spawns ORDER BY unit_id, id")
     spawns: dict[int, dict[int, list[list[float]]]] = {}
     for uid, zid, x, y in cur.fetchall():
-        spawns.setdefault(uid, {}).setdefault(zid, []).append([x, y])
+        spawns.setdefault(uid, {}).setdefault(_questie_zone(zid), []).append([x, y])
 
     cur = conn.execute("SELECT quest_id, starter_id FROM quest_starters WHERE starter_type = 'unit' ORDER BY starter_id, quest_id")
     quest_starts: dict[int, list[int]] = {}
@@ -74,6 +91,7 @@ def export_questie(
             unit_spawns = spawns.get(uid)
             q_starts = quest_starts.get(uid)
             q_ends = quest_ends.get(uid)
+            zone_id = _top_zone(spawns, [uid]) or 0
 
             # Questie NPC structure:
             # 1: name, 2: minLevelHealth, 3: maxLevelHealth, 4: minLevel, 5: maxLevel,
@@ -88,7 +106,7 @@ def export_questie(
                 rank or 0,
                 unit_spawns,
                 None,
-                None,
+                zone_id,
                 q_starts,
                 q_ends,
                 None,
@@ -107,7 +125,7 @@ def export_questie(
     cur = conn.execute("SELECT object_id, zone_id, x, y FROM object_spawns ORDER BY object_id, id")
     obj_spawns: dict[int, dict[int, list[list[float]]]] = {}
     for oid, zid, x, y in cur.fetchall():
-        obj_spawns.setdefault(oid, {}).setdefault(zid, []).append([x, y])
+        obj_spawns.setdefault(oid, {}).setdefault(_questie_zone(zid), []).append([x, y])
 
     cur = conn.execute("SELECT quest_id, starter_id FROM quest_starters WHERE starter_type = 'object' ORDER BY starter_id, quest_id")
     obj_starts: dict[int, list[int]] = {}
@@ -130,7 +148,7 @@ def export_questie(
 
             # Questie Object structure:
             # 1: name, 2: questStarts, 3: questEnds, 4: spawns, 5: zoneID, 6: factionID
-            fields = [name or f"Object #{oid}", q_starts, q_ends, o_spawns, None, fac_id]
+            fields = [name or f"Object #{oid}", q_starts, q_ends, o_spawns, _top_zone(obj_spawns, [oid]) or 0, fac_id]
             _trim_trailing_nils(fields)
             f.write(f"[{oid}] = {{{','.join(_serialize_compact(x) for x in fields)}}},\n")
         f.write("}]]\n")
@@ -294,6 +312,12 @@ def export_questie(
             _fin = finishers.get(qid)
             fin = _trim_trailing_nils([x or None for x in _fin]) if _fin and any(_fin) else None
 
+            # Zone: starter zone first, then finisher zone.
+            zone_sort = (
+                _top_zone(spawns, _st[0] if _st else None) or _top_zone(obj_spawns, _st[1] if _st else None)
+                or _top_zone(spawns, _fin[0] if _fin else None) or _top_zone(obj_spawns, _fin[1] if _fin else None)
+            )
+
             # Objectives: {[1]=creatures, [2]=objects, [3]=items}
             _objs = objectives.get(qid)
             objs = _trim_trailing_nils([x or None for x in _objs]) if _objs and any(_objs) else None
@@ -320,7 +344,7 @@ def export_questie(
                 None,
                 None,
                 exclusives.get(qid),
-                None,
+                zone_sort,
                 req_skill,
                 req_min_rep,
                 req_max_rep,
