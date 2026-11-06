@@ -150,6 +150,15 @@ CREATE TABLE IF NOT EXISTS quest_prerequisites (
     UNIQUE(quest_id, pre_quest_id, is_group)
 );
 
+
+-- Itemreq use-target links (quests-itemreq.lua roundtrip).
+-- ponytail: flat table, no quest_id: the addon keys pins by item only; value holds the raw Lua literal. Split per-quest if per-quest values ever appear.
+CREATE TABLE IF NOT EXISTS itemreq_links (
+    item_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    value TEXT NOT NULL DEFAULT '0',
+    PRIMARY KEY (item_id, target_id)
+);
 -- Mutually Exclusive / Conflicting Quests
 CREATE TABLE IF NOT EXISTS quest_exclusive (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

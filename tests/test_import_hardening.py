@@ -5,10 +5,12 @@ import pytest
 from pfquest_db.database import init_db
 from pfquest_db.importers.pfquest import (
     _backfill_quest_refs,
+    _backfill_trainer_subnames,
     _check_names,
     _int_entries,
     import_pfquest,
 )
+from pfquest_db.trainer_subnames import TRAINER_SUBNAMES
 from pfquest_db.importers.pfrb import import_pfrb
 from pfquest_db.importers.questie import _id_amount_list, import_questie
 
@@ -73,3 +75,16 @@ def test_backfill_placeholders(tmp_path):
     assert {2, 3, 4} <= {r[0] for r in conn.execute("SELECT id FROM quests")}
     conn.execute("INSERT INTO quest_starters (quest_id, starter_type, starter_id) VALUES (1, 'unit', 4242)")
     conn.commit()
+
+
+def test_trainer_subnames_backfilled_only_when_missing(tmp_path):
+    conn = init_db(tmp_path / "t.db")
+    uid = next(iter(TRAINER_SUBNAMES))
+    conn.execute("INSERT INTO units (id, name) VALUES (?, 'T')", (uid,))
+    conn.execute("INSERT INTO units (id, name, sub_name) VALUES (999999, 'K', 'Keep')")
+    assert _backfill_trainer_subnames(conn) >= 1
+    row = conn.execute("SELECT sub_name FROM units WHERE id = ?", (uid,)).fetchone()
+    assert row[0] == TRAINER_SUBNAMES[uid]
+    keep = conn.execute("SELECT sub_name FROM units WHERE id = 999999").fetchone()
+    assert keep[0] == "Keep"
+    conn.close()

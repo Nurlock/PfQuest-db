@@ -94,6 +94,20 @@ def cmd_import_pfrb(args) -> int:
     return 0
 
 
+def cmd_import_itemreq(args) -> int:
+    from .importers.pfquest import _import_itemreq_links
+
+    conn = init_db(args.db)
+    suffix = f"-{args.flavor}" if args.flavor else ""
+    stats: dict = {}
+    _import_itemreq_links(conn, Path(args.src) / "db", suffix, stats)
+    conn.commit()
+    conn.close()
+    print(f"Imported {stats.get('itemreq_links', 0)} itemreq links from: {args.src} -> {args.db}")
+    return 0
+
+
+
 def cmd_export_pfrb(args) -> int:
     _require_existing_db(args.db)
     conn = get_connection(args.db, create=False)
@@ -355,6 +369,12 @@ def main(argv=None) -> int:
     p_imp_pfrb.add_argument("--flavor", default="", help="Flavor suffix (default: '' for classic)")
     p_imp_pfrb.add_argument("--locale", default="enUS", help="Locale folder name (default: enUS)")
     p_imp_pfrb.set_defaults(func=cmd_import_pfrb)
+
+    p_imp_ir = subparsers.add_parser("import-itemreq", help="Import a quests-itemreq.lua file into SQLite (merges with existing links)")
+    p_imp_ir.add_argument("--src", required=True, help="Path to addon root directory containing db/quests-itemreq.lua")
+    p_imp_ir.add_argument("--db", required=True, help="Path to target SQLite database")
+    p_imp_ir.add_argument("--flavor", default="", help="Flavor suffix (default: '' for classic)")
+    p_imp_ir.set_defaults(func=cmd_import_itemreq)
 
     # export-pfrb / export-pf-rb
     p_exp_pfrb = subparsers.add_parser("export-pfrb", aliases=["export-pf-rb"], help="Export SQLite database to pfQuest-Reborn high-performance Lua files")

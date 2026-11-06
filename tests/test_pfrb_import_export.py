@@ -116,3 +116,32 @@ def test_export_all_lod_modules(tmp_path: Path):
         "pfQuest-Reborn-wotlk",
     }
 
+
+def test_pfrb_itemreq_roundtrip_and_derivation(tmp_path: Path):
+    conn = init_db(tmp_path / "ir.db")
+    conn.execute("INSERT INTO quests (id, title) VALUES (26939, 'Peace in Death')")
+    conn.execute(
+        "INSERT INTO quest_objectives (quest_id, objective_type, target_id, amount) "
+        "VALUES (26939, 'itemreq', 62811, 0)",
+    )
+    conn.execute(
+        "INSERT INTO quest_objectives (quest_id, objective_type, target_id, amount) "
+        "VALUES (26939, 'object', 250365, 0)",
+    )
+    conn.execute("INSERT INTO itemreq_links (item_id, target_id, value) VALUES (4472, -2705, '\"4141\"')")
+    conn.commit()
+    out = tmp_path / "reborn"
+    export_pfrb(conn, out, flavor="", locale="enUS")
+    conn.close()
+
+    text = (out / "db" / "quests-itemreq.lua").read_text(encoding="utf-8")
+    assert "[62811] = {" in text and "[-250365] = 0," in text
+    assert '[-2705] = "4141",' in text
+
+    conn2 = init_db(tmp_path / "ir2.db")
+    stats = import_pfrb(conn2, out, flavor="", locale="enUS")
+    assert stats["itemreq_links"] == 2
+    rows = conn2.execute("SELECT item_id, target_id, value FROM itemreq_links ORDER BY item_id").fetchall()
+    assert [tuple(r) for r in rows] == [(4472, -2705, '"4141"'), (62811, -250365, "0")]
+    conn2.close()
+

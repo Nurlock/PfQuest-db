@@ -13,6 +13,7 @@ from .pfquest import (
     _int_entries,
     _parse_level_range,
     _warn,
+    _import_itemreq_links,
     apply_pfquest_overwrites,
 )
 
@@ -91,6 +92,7 @@ def import_pfrb(
         "item_drops": 0,
         "item_vendors": 0,
         "quests": 0,
+        "itemreq_links": 0,
         "areatriggers": 0,
         "meta": 0,
         "minimap": 0,
@@ -663,6 +665,8 @@ def import_pfrb(
         exclusive_rows,
     )
 
+
+    _import_itemreq_links(conn, data_dir, suffix, stats)
 
     # 6. Area Triggers
     at_file = data_dir / f"areatrigger{suffix}.lua"

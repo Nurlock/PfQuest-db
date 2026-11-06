@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .._lua import _lua_str
 from ..lua_bridge import iter_lua_table_entries, load_lua_table
+from ..trainer_subnames import TRAINER_SUBNAMES
 
 
 PRE_CODE_TEMPLATE = """
@@ -87,6 +89,41 @@ def _int_entries(entries, what: str):
             _warn(f"{what} id", k)
 
 
+def _import_itemreq_links(conn: sqlite3.Connection, data_dir: Path, suffix: str, stats: dict) -> None:
+    """Import quests-itemreq.lua (item -> use-target gating) into itemreq_links.
+
+    The addon hides an itemreq use-target pin until the item is held. Without
+    these rows the exporter cannot emit the link and the pin renders ungated.
+    Union semantics: rows merge across base/overlay layers via INSERT OR REPLACE,
+    so an overlay file overrides keys but never wipes the other layer's links.
+    """
+    ir_file = data_dir / f"quests-itemreq{suffix}.lua"
+    if not ir_file.exists():
+        return
+    data_key = f"data{suffix}"
+    expr = f'pfDB["quests-itemreq"]["{data_key}"] or pfDB["quests-itemreq"]["data"]'
+    rows = []
+    for iid, targets in _int_entries(iter_lua_table_entries(ir_file, expr, PRE_CODE_TEMPLATE), "itemreq"):
+        if not isinstance(targets, dict):
+            _warn("itemreq targets", targets)
+            continue
+        for tkey, val in targets.items():
+            try:
+                tid = int(tkey)
+            except (ValueError, TypeError):
+                _warn("itemreq target", tkey)
+                continue
+            sval = _lua_str(val) if isinstance(val, str) else str(int(val))
+            rows.append((int(iid), tid, sval))
+    if rows:
+        conn.executemany(
+            "INSERT OR REPLACE INTO itemreq_links (item_id, target_id, value) VALUES (?, ?, ?)",
+            rows,
+        )
+    stats["itemreq_links"] = len(rows)
+
+
+
 def _backfill_quest_refs(conn: sqlite3.Connection, unit_ids, obj_ids, item_ids, quest_ids,
                             starter_rows, finisher_rows, objective_rows,
                             drop_rows=(), vendor_rows=(),
@@ -111,6 +148,19 @@ def _backfill_quest_refs(conn: sqlite3.Connection, unit_ids, obj_ids, item_ids, 
         conn.executemany("INSERT OR IGNORE INTO objects (id) VALUES (?)", [(o,) for o in need_o])
     if need_i:
         conn.executemany("INSERT OR IGNORE INTO items (id) VALUES (?)", [(i,) for i in need_i])
+
+
+def _backfill_trainer_subnames(conn: sqlite3.Connection) -> int:
+    """Fill missing NPC titles for known profession trainers.
+
+    pfQuest sources carry no subnames, so Townsfolk cannot match trainers
+    to professions. Only NULL/empty titles are touched.
+    """
+    cur = conn.executemany(
+        "UPDATE units SET sub_name = ? WHERE id = ? AND (sub_name IS NULL OR sub_name = '')",
+        [(sub, uid) for uid, sub in TRAINER_SUBNAMES.items()],
+    )
+    return cur.rowcount
 
 
 def _purge_entity_children(conn: sqlite3.Connection, category: str, ids: list[int]) -> None:
@@ -287,6 +337,7 @@ def import_pfquest(
         "item_drops": 0,
         "item_vendors": 0,
         "quests": 0,
+        "itemreq_links": 0,
         "areatriggers": 0,
         "meta": 0,
         "minimap": 0,
@@ -379,7 +430,7 @@ def import_pfquest(
             min_l, max_l = _parse_level_range(udata.get("lvl") if isinstance(udata, dict) else None)
             rank = udata.get("rnk", 0) if isinstance(udata, dict) else 0
             fac = udata.get("fac") if isinstance(udata, dict) else None
-            unit_rows.append((uid_int, name, min_l, max_l, rank, fac, None, 0))
+            unit_rows.append((uid_int, name, min_l, max_l, rank, fac, TRAINER_SUBNAMES.get(uid_int), 0))
 
             coords = udata.get("coords", []) if isinstance(udata, dict) else []
             coord_pts = list(coords.values()) if isinstance(coords, dict) else coords
@@ -397,7 +448,7 @@ def import_pfquest(
     existing_unit_ids = {r[0] for r in unit_rows}
     for uid_int, name in unit_names.items():
         if uid_int not in existing_unit_ids:
-            unit_rows.append((uid_int, name, None, None, 0, None, None, 0))
+            unit_rows.append((uid_int, name, None, None, 0, None, TRAINER_SUBNAMES.get(uid_int), 0))
 
     # Overlay layers replace whole entries (mirrors runtime patchtable:
     # base[k] = v). Purge stale child rows for overlaid ids first, so moved
@@ -419,6 +470,8 @@ def import_pfquest(
         unit_rows,
     )
     stats["units"] = len(unit_rows)
+
+    _backfill_trainer_subnames(conn)
 
     # Make sure all zone IDs in spawn_rows exist in zones table to respect FK
     spawns_zone_ids = {r[1] for r in spawn_rows}
@@ -823,6 +876,8 @@ def import_pfquest(
         exclusive_rows,
     )
 
+
+    _import_itemreq_links(conn, data_dir, suffix, stats)
 
     # 6. Area Triggers
     at_file = data_dir / f"areatrigger{suffix}.lua"
