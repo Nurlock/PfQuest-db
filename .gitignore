@@ -18,8 +18,9 @@ wheels/
 *.diff.sql
 reborn.db
 epoch.db
-ref/*.db
+!ref/*.db
 ref/staging/
+ref/reborn.db
 
 # Test caches
 .pytest_cache/

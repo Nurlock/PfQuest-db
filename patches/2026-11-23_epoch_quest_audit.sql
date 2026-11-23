@@ -1,7 +1,54 @@
 -- ============================================================================
--- PROJECT EPOCH DATABASE AUDIT REMEDIATION SCRIPT
--- Target: epoch.db
--- Generated from Audit & Comparison with Questie DB
+-- PATCH: Project Epoch Database Quest Integrity Remediation
+-- File: patches/2026-11-23_epoch_quest_audit.sql
+-- Target Database: ref/epoch.db (or epoch.db)
+-- Author: Nurlock
+--
+-- PURPOSE & ARCHITECTURAL CONTEXT:
+-- The reference databases in ref/*.db are public assets open for third-party
+-- development, bug fixes, and re-imports from upstream. When raw Lua data from
+-- pfQuest-epoch is re-imported, baseline data anomalies can reappear.
+--
+-- This patch documents and applies confirmed quest integrity corrections
+-- discovered during the database audit and cross-referenced against Questie
+-- (AzerothCore/Classic) ground truth.
+--
+-- HOW TO APPLY THIS PATCH:
+--   sqlite3 ref/epoch.db < patches/2026-11-23_epoch_quest_audit.sql
+--
+-- After applying, export the updated database to pfQuest-Reborn via:
+--   uv run pfquest-db export-pfrb --db ref/epoch.db --dest ../pfQuest-Reborn
+--
+-- SUMMARY OF ISSUES REMEDIATED:
+-- 1. Level 0 & Inverted Level Anomalies:
+--    - Badlands quests (26578, 26579, 26581, 26583, 26585) set to min_level 35.
+--    - Elwynn Forest quests (26778-26784) set to min_level 1-4.
+--    - Durotar (27171) set to min_level 12, Barrens (27196) set to min_level 10.
+--    - Hillsbrad Syndicate (26831, 26832) set to min_level 20.
+--    - Shimmering Flats race quests (27491, 27493, 27494) set to min_level 30.
+--    - Silithus quests (9415, 9416, 9419, 9422) placeholder min_level 1 corrected
+--      to 55 (verified from Questie).
+--    - Active quests with NULL min_level (117, 31037-31041) populated.
+-- 2. Blanket min_level = 5 on Commissions & Inverted Levels:
+--    - Normalized 472 custom commission quests into appropriate level brackets
+--      (1 for Apprentice, 10 for low-tier, 15 for mid-tier, 25 for Expert,
+--      35 for lvl 40, 45 for lvl 50-55).
+--    - Fixed 4 Silver Mining commissions (28636, 28637, 28660, 28661) from
+--      inverted level 2 to level 20 (min_level 15).
+-- 3. Profession Skill Discrepancies (skillmin):
+--    - Synchronized Cooking Journeyman commissions (28064, 28065, 28080, 28081)
+--      to Cooking 75 and min_level 10.
+--    - Fixed crafting under-requirements: Quest 28493 (Mageweave Bandage -> First Aid 210),
+--      Quest 27684 (Truesilver Key -> Blacksmithing 225), Quest 28391 (Lesser Mystic Wand -> Enchanting 175).
+--    - Restored canonical skillmin requirements for 119 standard vanilla quests
+--      directly from Questie database (e.g. Nat Pagle 225, Clamlette 225, Triage 225).
+-- 4. Faction Racial Bitmasks:
+--    - Applied required_races = 77 (Alliance) to 545 Alliance-only custom quests.
+--    - Applied required_races = 178 (Horde) to 529 Horde-only custom quests.
+--    - Prevents cross-faction map pin leaks in pfQuest.
+-- 5. Orphan Quests:
+--    - Inserted missing starter/finisher NPC 45976 for Quest 28711 (Tyraeth Morningshade).
+--    - Inserted missing starter/finisher NPC 45513 for Quest 26473 (Mar Softhoof).
 -- ============================================================================
 
 BEGIN TRANSACTION;
@@ -67,7 +114,7 @@ UPDATE quests SET min_level = 45 WHERE title LIKE 'Commission%' AND min_level = 
 -- ----------------------------------------------------------------------------
 
 -- Cooking Journeyman commissions: align 28064, 28065, 28081 with 28080 (Cooking 75, min_level 10)
-UPDATE quests SET required_skill_value = 75, min_level = 10 WHERE id IN (28064, 28065, 28081);
+UPDATE quests SET required_skill_value = 75, min_level = 10 WHERE id IN (28064, 28065, 28080, 28081);
 
 -- Under-leveled crafting requirements (recipe learning requirement > quest required skill)
 UPDATE quests SET required_skill_value = 210 WHERE id = 28493; -- Mageweave Bandage (requires First Aid 210)
