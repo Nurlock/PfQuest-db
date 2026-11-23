@@ -14,9 +14,12 @@ wheels/
 *.db-journal
 *.db-wal
 *.db-shm
+*.bak
+*.diff.sql
 reborn.db
 epoch.db
 ref/*.db
+ref/staging/
 
 # Test caches
 .pytest_cache/

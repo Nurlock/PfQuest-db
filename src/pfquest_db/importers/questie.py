@@ -10,8 +10,35 @@ from .pfquest import _backfill_quest_refs, _check_names, _int_entries
 
 
 QUESTIE_PRE_CODE = """
+local loadstring = loadstring or load
+UnitFactionGroup = function() return "Horde" end
 QuestieDB = {}
 QuestieLoader = { ImportModule = function() return QuestieDB end }
+
+function _eval_questie_data(data)
+    local loadstring = loadstring or load
+    if type(data) == "table" then
+        if data.__questieSourceChunks then
+            local res = {}
+            for i = 1, #data do
+                local chunk_fn = assert(loadstring(data[i]))
+                local chunk_tbl = chunk_fn()
+                if type(chunk_tbl) == "table" then
+                    for k, v in pairs(chunk_tbl) do
+                        res[k] = v
+                    end
+                end
+            end
+            return res
+        else
+            return data
+        end
+    elseif type(data) == "string" then
+        return assert(loadstring(data))()
+    else
+        return data
+    end
+end
 """
 
 
@@ -180,7 +207,7 @@ def import_questie(
     unit_rows = []
     unit_spawn_rows = []
     if npc_file.exists():
-        expr = "assert(loadstring(QuestieDB.npcData))()"
+        expr = "_eval_questie_data(QuestieDB.npcData)"
         for uid, ndata in _int_entries(iter_lua_table_entries(npc_file, expr, QUESTIE_PRE_CODE), "unit"):
             if not isinstance(ndata, (list, dict)):
                 continue
@@ -246,7 +273,7 @@ def import_questie(
     obj_rows = []
     obj_spawn_rows = []
     if obj_file.exists():
-        expr = "assert(loadstring(QuestieDB.objectData))()"
+        expr = "_eval_questie_data(QuestieDB.objectData)"
         for oid, odata in _int_entries(iter_lua_table_entries(obj_file, expr, QUESTIE_PRE_CODE), "object"):
             if not isinstance(odata, (list, dict)):
                 continue
@@ -303,7 +330,7 @@ def import_questie(
     drop_rows = []
     vendor_rows = []
     if item_file.exists():
-        expr = "assert(loadstring(QuestieDB.itemData))()"
+        expr = "_eval_questie_data(QuestieDB.itemData)"
         for iid, idata in _int_entries(iter_lua_table_entries(item_file, expr, QUESTIE_PRE_CODE), "item"):
             if not isinstance(idata, (list, dict)):
                 continue
@@ -400,7 +427,7 @@ def import_questie(
     exclusive_rows = []
 
     if quest_file.exists():
-        expr = "assert(loadstring(QuestieDB.questData))()"
+        expr = "_eval_questie_data(QuestieDB.questData)"
         for qid, qdata in _int_entries(iter_lua_table_entries(quest_file, expr, QUESTIE_PRE_CODE), "quest"):
             if not isinstance(qdata, (list, dict)):
                 continue
