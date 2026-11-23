@@ -37,7 +37,7 @@ def _resolve_read_db(db_path: object, flavor: object = None) -> str:
         ref = Path("ref") / f"{flv or 'vanilla'}.db"
         if ref.is_file():
             return str(ref)
-    for candidate in ("epoch.db", "vanilla.db", "wotlk.db", "tbc.db"):
+    for candidate in ("epoch.db", "reborn.db", "vanilla.db", "wotlk.db", "tbc.db"):
         if (Path("ref") / candidate).is_file():
             return str(Path("ref") / candidate)
     return str(Path("ref") / "epoch.db")
