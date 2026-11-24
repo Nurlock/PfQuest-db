@@ -59,18 +59,29 @@ pfquest-db [-h] {init,import-pfquest,export-pfquest,import-questie,export-questi
 
 ### 1. Initialize a Database
 ```bash
-uv run pfquest-db init --db epoch.db
+uv run pfquest-db init --db ref/epoch.db
 ```
 
-### 2. Import pfQuest Data
-Import the pfQuest-epoch database into SQLite:
+### 2. Import pfQuest Data with Staging & sqldiff
+The reference databases in `ref/<version>.db` (e.g. `ref/epoch.db`, `ref/vanilla.db`, `ref/tbc.db`, `ref/wotlk.db`) are treated as the source of truth. When importing, pfQuest DB stages the import in `ref/staging/<version>.db` and executes `sqldiff` to calculate and display the exact delta (additions, removals, modifications) between the reference and staged versions:
+
 ```bash
-uv run pfquest-db import-pfquest --src ../pfQuest-epoch --db epoch.db --flavor epoch
+# Staged import with sqldiff comparison (ref/epoch.db remains untouched):
+uv run pfquest-db import-pfquest --src ../pfQuest-epoch --flavor epoch
+
+# Inspect the diff summary or SQL patch:
+uv run pfquest-db diff --flavor epoch
+uv run pfquest-db diff --flavor epoch --sql --table units
+
+# Apply the staged import to the reference source of truth:
+uv run pfquest-db import-pfquest --src ../pfQuest-epoch --flavor epoch --apply
+# Or apply an existing staged diff:
+uv run pfquest-db diff --flavor epoch --apply
 ```
 
 ### 3. Check Statistics
 ```bash
-uv run pfquest-db stats --db epoch.db
+uv run pfquest-db stats --db ref/epoch.db
 ```
 
 Output:

@@ -1,19 +1,13 @@
 """pfQuest-Reborn high performance Lua database exporter."""
 
+import re
 import sqlite3
 from pathlib import Path
 
+from pfquest_db._lua import _lua_str
 
-def _lua_str(s: str) -> str:
-    """Escape and format string for Lua."""
-    s = (
-        s.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-    return f'"{s}"'
+
+_LITERAL_RE = re.compile(r"-?\d+|\"(?:[^\"\\]|\\.)*\"")
 
 
 def export_pfrb(
@@ -66,7 +60,7 @@ def export_pfrb(
     unit_spawns: dict[int, list] = {}
     for r in cur.fetchall():
         uid, x, y, zid, respawn = r
-        unit_spawns.setdefault(uid, []).append([round(x, 2), round(y, 2), zid, respawn])
+        unit_spawns.setdefault(uid, []).append([x, y, zid, respawn])
 
     with open(data_dir / f"units{suffix}.lua", "w", encoding="utf-8") as f:
         f.write(f'pfDB["units"]["{data_key}"] = {{\n')
@@ -78,7 +72,7 @@ def export_pfrb(
 
             parts = []
             if fac:
-                parts.append(f'["fac"] = "{fac}"')
+                parts.append(f'["fac"] = {_lua_str(fac)}')
             if min_l is not None:
                 lvl_str = f'"{min_l}"' if min_l == max_l else f'"{min_l}-{max_l}"'
                 parts.append(f'["lvl"] = {lvl_str}')
@@ -107,7 +101,7 @@ def export_pfrb(
     obj_spawns: dict[int, list] = {}
     for r in cur.fetchall():
         oid, x, y, zid, respawn = r
-        obj_spawns.setdefault(oid, []).append([round(x, 2), round(y, 2), zid, respawn])
+        obj_spawns.setdefault(oid, []).append([x, y, zid, respawn])
 
     with open(data_dir / f"objects{suffix}.lua", "w", encoding="utf-8") as f:
         f.write(f'pfDB["objects"]["{data_key}"] = {{\n')
@@ -119,7 +113,7 @@ def export_pfrb(
 
             parts = []
             if fac:
-                parts.append(f'["fac"] = "{fac}"')
+                parts.append(f'["fac"] = {_lua_str(fac)}')
             if spawns:
                 spawns_str = ";".join(f"{pt[0]},{pt[1]},{pt[2]},{pt[3]}" for pt in spawns)
                 parts.append(f'["__c"] = "{spawns_str}"')
@@ -139,17 +133,17 @@ def export_pfrb(
     cur = conn.execute("SELECT id, name FROM items ORDER BY id")
     item_rows = cur.fetchall()
 
-    cur = conn.execute("SELECT item_id, source_type, source_id, drop_chance FROM item_drops ORDER BY item_id")
+    cur = conn.execute("SELECT item_id, source_type, source_id, drop_chance FROM item_drops ORDER BY item_id, source_type, source_id")
     unit_drops: dict[int, dict[int, float]] = {}
     obj_drops: dict[int, dict[int, float]] = {}
     for r in cur.fetchall():
         iid, stype, sid, chance = r
         if stype == "unit":
-            unit_drops.setdefault(iid, {})[sid] = round(chance, 4)
+            unit_drops.setdefault(iid, {})[sid] = chance
         elif stype == "object":
-            obj_drops.setdefault(iid, {})[sid] = round(chance, 4)
+            obj_drops.setdefault(iid, {})[sid] = chance
 
-    cur = conn.execute("SELECT item_id, unit_id, stock FROM item_vendors ORDER BY item_id")
+    cur = conn.execute("SELECT item_id, unit_id, stock FROM item_vendors ORDER BY item_id, unit_id")
     vendors: dict[int, dict[int, int]] = {}
     for r in cur.fetchall():
         iid, uid, stock = r
@@ -312,6 +306,48 @@ def export_pfrb(
                 f.write(f"  [{qid}] = {{ {', '.join(parts)} }},\n")
         f.write("}\n")
 
+    # 5b. Quest item requirements (use-item gating for the quest log)
+    stored: dict[int, dict[int, str]] = {}
+    cur = conn.execute("SELECT item_id, target_id, value FROM itemreq_links ORDER BY item_id, target_id")
+    for iid, tid, val in cur.fetchall():
+        stored.setdefault(iid, {})[tid] = val if val is not None else "0"
+
+    # ponytail: gap-fill only items with NO stored entry (fail-open class);
+    # stored spell-id values are never touched. Merge per-target if partial gaps show up.
+    per_quest: dict[int, dict[str, list[int]]] = {}
+    cur = conn.execute(
+        "SELECT quest_id, objective_type, target_id FROM quest_objectives "
+        "WHERE objective_type IN ('itemreq', 'object', 'unit') AND target_id IS NOT NULL"
+    )
+    for qid, otype, tid in cur.fetchall():
+        per_quest.setdefault(qid, {}).setdefault(otype, []).append(tid)
+    derived: dict[int, dict[int, str]] = {}
+    for groups in per_quest.values():
+        for iid in groups.get("itemreq", []):
+            if iid in stored:
+                continue
+            for tid in groups.get("object", []):
+                derived.setdefault(iid, {})[-tid] = "0"
+            for tid in groups.get("unit", []):
+                derived.setdefault(iid, {})[tid] = "0"
+
+    merged = {iid: dict(targets) for iid, targets in stored.items()}
+    for iid, targets in derived.items():
+        merged.setdefault(iid, {}).update(targets)
+
+    if merged:
+        with open(data_dir / f"quests-itemreq{suffix}.lua", "w", encoding="utf-8") as f:
+            f.write(f'pfDB["quests-itemreq"]["{data_key}"] = {{\n')
+            for iid in sorted(merged):
+                f.write(f"  [{iid}] = {{\n")
+                for tid in sorted(merged[iid]):
+                    val = merged[iid][tid]
+                    # values are stored as Lua literals; re-quote anything hand-edited into junk
+                    val_out = val if _LITERAL_RE.fullmatch(val) else _lua_str(val)
+                    f.write(f"    [{tid}] = {val_out},\n")
+                f.write("  },\n")
+            f.write("}\n")
+
     # 6. Area Triggers
     cur = conn.execute("SELECT id, x, y, zone_id FROM areatriggers ORDER BY id")
     at_rows = cur.fetchall()
@@ -319,7 +355,7 @@ def export_pfrb(
         with open(data_dir / f"areatrigger{suffix}.lua", "w", encoding="utf-8") as f:
             f.write(f'pfDB["areatrigger"]["{data_key}"] = {{\n')
             for aid, x, y, zid in at_rows:
-                f.write(f'  [{aid}] = {{ ["__c"] = "{round(x, 2)},{round(y, 2)},{zid},0" }},\n')
+                f.write(f'  [{aid}] = {{ ["__c"] = "{x},{y},{zid},0" }},\n')
             f.write("}\n")
 
     # 7. Meta relations
@@ -335,7 +371,7 @@ def export_pfrb(
             for cat, entries in sorted(meta_dict.items()):
                 f.write(f'  ["{cat}"] = {{\n')
                 for eid, val in sorted(entries.items()):
-                    val_out = f'"{val}"' if not val.isdigit() else val
+                    val_out = val if val.isdigit() else _lua_str(val)
                     f.write(f"    [{eid}] = {val_out},\n")
                 f.write("  },\n")
             f.write("}\n")

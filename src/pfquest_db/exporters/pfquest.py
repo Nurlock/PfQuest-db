@@ -3,17 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-
-def _lua_str(s: str) -> str:
-    """Escape and format string for Lua."""
-    s = (
-        s.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-    return f'"{s}"'
+from pfquest_db._lua import _lua_str
 
 
 def export_pfquest(
@@ -66,7 +56,7 @@ def export_pfquest(
     unit_spawns: dict[int, list] = {}
     for r in cur.fetchall():
         uid, x, y, zid, respawn = r
-        unit_spawns.setdefault(uid, []).append([round(x, 2), round(y, 2), zid, respawn])
+        unit_spawns.setdefault(uid, []).append([x, y, zid, respawn])
 
     with open(data_dir / f"units{suffix}.lua", "w", encoding="utf-8") as f:
         f.write(f'pfDB["units"]["{data_key}"] = {{\n')
@@ -107,7 +97,7 @@ def export_pfquest(
     obj_spawns: dict[int, list] = {}
     for r in cur.fetchall():
         oid, x, y, zid, respawn = r
-        obj_spawns.setdefault(oid, []).append([round(x, 2), round(y, 2), zid, respawn])
+        obj_spawns.setdefault(oid, []).append([x, y, zid, respawn])
 
     with open(data_dir / f"objects{suffix}.lua", "w", encoding="utf-8") as f:
         f.write(f'pfDB["objects"]["{data_key}"] = {{\n')
@@ -141,17 +131,17 @@ def export_pfquest(
     cur = conn.execute("SELECT id, name FROM items ORDER BY id")
     item_rows = cur.fetchall()
 
-    cur = conn.execute("SELECT item_id, source_type, source_id, drop_chance FROM item_drops ORDER BY item_id")
+    cur = conn.execute("SELECT item_id, source_type, source_id, drop_chance FROM item_drops ORDER BY item_id, source_type, source_id")
     unit_drops: dict[int, dict[int, float]] = {}
     obj_drops: dict[int, dict[int, float]] = {}
     for r in cur.fetchall():
         iid, stype, sid, chance = r
         if stype == "unit":
-            unit_drops.setdefault(iid, {})[sid] = round(chance, 4)
+            unit_drops.setdefault(iid, {})[sid] = chance
         elif stype == "object":
-            obj_drops.setdefault(iid, {})[sid] = round(chance, 4)
+            obj_drops.setdefault(iid, {})[sid] = chance
 
-    cur = conn.execute("SELECT item_id, unit_id, stock FROM item_vendors ORDER BY item_id")
+    cur = conn.execute("SELECT item_id, unit_id, stock FROM item_vendors ORDER BY item_id, unit_id")
     vendors: dict[int, dict[int, int]] = {}
     for r in cur.fetchall():
         iid, uid, stock = r
@@ -331,7 +321,7 @@ def export_pfquest(
             for aid, x, y, zid in at_rows:
                 f.write(f"  [{aid}] = {{\n")
                 f.write("    [\"coords\"] = {\n")
-                f.write(f"      [1] = {{ {round(x, 2)}, {round(y, 2)}, {zid}, 0 }},\n")
+                f.write(f"      [1] = {{ {x}, {y}, {zid}, 0 }},\n")
                 f.write("    },\n")
                 f.write("  },\n")
             f.write("}\n")
@@ -349,7 +339,7 @@ def export_pfquest(
             for cat, entries in sorted(meta_dict.items()):
                 f.write(f'  ["{cat}"] = {{\n')
                 for eid, val in sorted(entries.items()):
-                    val_out = f'"{val}"' if not val.isdigit() else val
+                    val_out = val if val.isdigit() else _lua_str(val)
                     f.write(f"    [{eid}] = {val_out},\n")
                 f.write("  },\n")
             f.write("}\n")

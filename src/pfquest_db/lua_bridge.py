@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Generator, Tuple, Optional
 
@@ -95,6 +96,7 @@ end
 
     try:
         assert proc.stdout is not None
+        skipped = 0
         for line in proc.stdout:
             line = line.strip()
             if not line:
@@ -103,9 +105,12 @@ end
                 k, v = json.loads(line)
                 yield k, v
             except json.JSONDecodeError:
+                skipped += 1
                 continue
 
         _, stderr = proc.communicate()
+        if skipped:
+            print(f"warning: skipped {skipped} unparsable Lua output line(s)", file=sys.stderr)
         if proc.returncode != 0:
             raise RuntimeError(f"Lua execution failed ({proc.returncode}): {stderr}")
     finally:

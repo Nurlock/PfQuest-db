@@ -1,5 +1,7 @@
 """SQLite schema definitions, tables, indexes, and views for pfQuest DB."""
 
+import sqlite3
+
 SCHEMA_SQL = """
 -- Zones
 CREATE TABLE IF NOT EXISTS zones (
@@ -141,6 +143,7 @@ CREATE TABLE IF NOT EXISTS quest_objectives (
 );
 
 -- Quest Prerequisites
+-- shortcut: no FK on pre_quest_id/exclusive_quest_id/minimap.zone_id: source data has dangling refs; enforcing breaks imports. Add FKs once importer backfills placeholders.
 CREATE TABLE IF NOT EXISTS quest_prerequisites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     quest_id INTEGER NOT NULL REFERENCES quests(id) ON DELETE CASCADE,
@@ -149,6 +152,15 @@ CREATE TABLE IF NOT EXISTS quest_prerequisites (
     UNIQUE(quest_id, pre_quest_id, is_group)
 );
 
+
+-- Itemreq use-target links (quests-itemreq.lua roundtrip).
+-- ponytail: flat table, no quest_id: the addon keys pins by item only; value holds the raw Lua literal. Split per-quest if per-quest values ever appear.
+CREATE TABLE IF NOT EXISTS itemreq_links (
+    item_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    value TEXT NOT NULL DEFAULT '0',
+    PRIMARY KEY (item_id, target_id)
+);
 -- Mutually Exclusive / Conflicting Quests
 CREATE TABLE IF NOT EXISTS quest_exclusive (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,6 +200,35 @@ CREATE TABLE IF NOT EXISTS professions (
     name TEXT NOT NULL
 );
 
+-- Dungeons and Raids
+CREATE TABLE IF NOT EXISTS dungeons (
+    id INTEGER PRIMARY KEY REFERENCES zones(id),
+    name TEXT NOT NULL,
+    expansion TEXT NOT NULL,         -- 'classic', 'tbc', 'wotlk', 'epoch'
+    is_raid INTEGER NOT NULL DEFAULT 0,
+    group_size TEXT,                -- '5-man', '10-man', '20-man', '25-man', '40-man', '10/25-man'
+    min_level INTEGER,
+    max_level INTEGER,
+    subzone_id INTEGER REFERENCES zones(id),
+    parent_zone_id INTEGER REFERENCES zones(id),
+    meeting_stone_id INTEGER REFERENCES objects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dungeons_expansion ON dungeons(expansion);
+CREATE INDEX IF NOT EXISTS idx_dungeons_is_raid ON dungeons(is_raid);
+CREATE INDEX IF NOT EXISTS idx_dungeons_parent_zone ON dungeons(parent_zone_id);
+
+-- Dungeon Entrance Locations
+CREATE TABLE IF NOT EXISTS dungeon_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dungeon_id INTEGER NOT NULL REFERENCES dungeons(id) ON DELETE CASCADE,
+    zone_id INTEGER NOT NULL REFERENCES zones(id),
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',  -- e.g. 'Main Entrance', 'Service Entrance', 'Orange Portal', 'Purple Portal'
+    UNIQUE(dungeon_id, zone_id, notes)
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_unit_spawns_unit ON unit_spawns(unit_id);
 CREATE INDEX IF NOT EXISTS idx_unit_spawns_zone ON unit_spawns(zone_id);
@@ -208,6 +249,8 @@ CREATE INDEX IF NOT EXISTS idx_objects_name ON objects(name);
 CREATE INDEX IF NOT EXISTS idx_items_name ON items(name);
 CREATE INDEX IF NOT EXISTS idx_quests_title ON quests(title);
 CREATE INDEX IF NOT EXISTS idx_quests_lvl ON quests(quest_level, min_level);
+CREATE INDEX IF NOT EXISTS idx_dungeon_locations_dungeon ON dungeon_locations(dungeon_id);
+CREATE INDEX IF NOT EXISTS idx_dungeon_locations_zone ON dungeon_locations(zone_id);
 
 -- Human-Friendly Views
 DROP VIEW IF EXISTS v_quests;
@@ -229,6 +272,8 @@ SELECT
     q.description
 FROM quests q;
 
+-- NOTE: v_quest_details uses correlated subqueries: fast for single-row lookups
+-- (WHERE quest_id = ?), slow for full scans; bulk readers use base tables + GROUP BY.
 DROP VIEW IF EXISTS v_quest_details;
 CREATE VIEW v_quest_details AS
 SELECT 
@@ -297,6 +342,7 @@ LEFT JOIN units u ON qo.objective_type = 'unit' AND qo.target_id = u.id
 LEFT JOIN items i ON qo.objective_type IN ('item', 'itemreq') AND qo.target_id = i.id
 LEFT JOIN objects o ON qo.objective_type = 'object' AND qo.target_id = o.id;
 
+-- NOTE: v_npc_details uses correlated subqueries: fast for single-row lookups, slow for full scans; bulk readers use base tables + GROUP BY.
 DROP VIEW IF EXISTS v_npc_details;
 CREATE VIEW v_npc_details AS
 SELECT 
@@ -322,6 +368,7 @@ SELECT
      WHERE qf.finisher_type = 'unit' AND qf.finisher_id = u.id) AS quests_ended
 FROM units u;
 
+-- NOTE: v_item_sources uses a correlated subquery (drop_zones): fast for single-row lookups, slow for full scans; bulk readers use base tables + GROUP BY.
 DROP VIEW IF EXISTS v_item_sources;
 CREATE VIEW v_item_sources AS
 SELECT 
@@ -346,6 +393,7 @@ JOIN item_drops d ON i.id = d.item_id
 LEFT JOIN units u ON d.source_type = 'unit' AND d.source_id = u.id
 LEFT JOIN objects o ON d.source_type = 'object' AND d.source_id = o.id;
 
+-- NOTE: v_zone_summary uses correlated subqueries: fast for single-row lookups, slow for full scans; bulk readers use base tables + GROUP BY.
 DROP VIEW IF EXISTS v_zone_summary;
 CREATE VIEW v_zone_summary AS
 SELECT 
@@ -400,6 +448,34 @@ SELECT
 FROM item_vendors v
 LEFT JOIN items i ON v.item_id = i.id
 LEFT JOIN units u ON v.unit_id = u.id;
+
+DROP VIEW IF EXISTS v_dungeons;
+CREATE VIEW v_dungeons AS
+SELECT 
+    d.id,
+    d.name,
+    d.expansion,
+    d.is_raid,
+    d.group_size,
+    CASE 
+        WHEN d.min_level IS NOT NULL AND d.max_level IS NOT NULL THEN d.min_level || '-' || d.max_level
+        WHEN d.min_level IS NOT NULL THEN CAST(d.min_level AS TEXT)
+        ELSE 'N/A'
+    END AS level_range,
+    d.subzone_id,
+    sz.name AS subzone_name,
+    d.parent_zone_id,
+    pz.name AS parent_zone_name,
+    d.meeting_stone_id,
+    o.name AS meeting_stone_name,
+    (SELECT GROUP_CONCAT(pz2.name || ' (' || dl.x || ', ' || dl.y || ')' || CASE WHEN dl.notes != '' THEN ' [' || dl.notes || ']' ELSE '' END, '; ')
+     FROM dungeon_locations dl
+     LEFT JOIN zones pz2 ON dl.zone_id = pz2.id
+     WHERE dl.dungeon_id = d.id) AS entrance_locations
+FROM dungeons d
+LEFT JOIN zones sz ON d.subzone_id = sz.id
+LEFT JOIN zones pz ON d.parent_zone_id = pz.id
+LEFT JOIN objects o ON d.meeting_stone_id = o.id;
 """
 
 FTS_SCHEMA_SQL = """
@@ -413,8 +489,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
 """
 
 
-def init_database(conn) -> None:
+def init_database(conn: sqlite3.Connection) -> None:
     """Initialize the schema, tables, indexes, and views on the given connection."""
+    # Guarded table migration for dungeons and dungeon_locations
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(dungeon_locations)")
+    dl_cols = {row[1] for row in cursor.fetchall()}
+    cursor.execute("PRAGMA table_info(dungeons)")
+    d_cols = {row[1] for row in cursor.fetchall()}
+
+    recreate_dungeons = False
+    if dl_cols and "notes" not in dl_cols:
+        recreate_dungeons = True
+    if d_cols and "expansion" not in d_cols:
+        recreate_dungeons = True
+
+    if recreate_dungeons:
+        conn.execute("DROP VIEW IF EXISTS v_dungeons;")
+        conn.execute("DROP TABLE IF EXISTS dungeon_locations;")
+        conn.execute("DROP TABLE IF EXISTS dungeons;")
+        conn.commit()
+
     conn.executescript(SCHEMA_SQL)
     conn.executescript(FTS_SCHEMA_SQL)
     conn.commit()
@@ -422,14 +517,8 @@ def init_database(conn) -> None:
 
 def rebuild_search_index(conn) -> int:
     """Rebuild the FTS5 search index from all core tables."""
+    conn.executescript(FTS_SCHEMA_SQL)
     conn.executescript("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-            entity_type UNINDEXED,
-            entity_id UNINDEXED,
-            name,
-            extra_text,
-            tokenize = 'porter unicode61'
-        );
         DELETE FROM search_index;
 
         INSERT INTO search_index(entity_type, entity_id, name, extra_text)

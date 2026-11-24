@@ -19,6 +19,8 @@ def test_init_database(tmp_path):
         "item_drops",
         "item_vendors",
         "zones",
+        "dungeons",
+        "dungeon_locations",
         "areatriggers",
         "meta",
         "minimap",
@@ -35,6 +37,76 @@ def test_init_database(tmp_path):
     assert "v_spawns" in views
     assert "v_drops" in views
     assert "v_vendors" in views
+    assert "v_dungeons" in views
+
+    conn.close()
+
+
+def test_dungeons_schema_and_cascade_delete(tmp_path):
+    db_path = tmp_path / "test_dungeons.db"
+    conn = init_db(db_path)
+
+    conn.execute("INSERT INTO zones (id, name) VALUES (130, 'Silverpine Forest')")
+    conn.execute("INSERT INTO zones (id, name) VALUES (209, 'Shadowfang Keep')")
+    conn.execute(
+        """
+        INSERT INTO dungeons (id, name, expansion, is_raid, group_size, min_level, max_level, parent_zone_id)
+        VALUES (209, 'Shadowfang Keep', 'classic', 0, '5-man', 18, 26, 130)
+        """
+    )
+    conn.execute(
+        "INSERT INTO dungeon_locations (dungeon_id, zone_id, x, y, notes) VALUES (209, 130, 44.8, 67.8, '')"
+    )
+    conn.commit()
+
+    # Verify inserted
+    cur = conn.execute("SELECT COUNT(*) FROM dungeon_locations WHERE dungeon_id = 209")
+    assert cur.fetchone()[0] == 1
+
+    # Cascade delete when dungeon is deleted
+    conn.execute("DELETE FROM dungeons WHERE id = 209")
+    conn.commit()
+    cur = conn.execute("SELECT COUNT(*) FROM dungeon_locations WHERE dungeon_id = 209")
+    assert cur.fetchone()[0] == 0
+
+    conn.close()
+
+
+def test_v_dungeons_null_safe(tmp_path):
+    db_path = tmp_path / "test_v_dungeons.db"
+    conn = init_db(db_path)
+
+    conn.execute("INSERT INTO zones (id, name) VALUES (1, 'Dun Morogh')")
+    conn.execute("INSERT INTO zones (id, name) VALUES (721, 'Gnomeregan')")
+    conn.execute("INSERT INTO zones (id, name) VALUES (15, 'Dustwallow Marsh')")
+    conn.execute("INSERT INTO zones (id, name) VALUES (2159, 'Onyxia Lair')")
+
+    # Dungeon with min_level and max_level
+    conn.execute(
+        """
+        INSERT INTO dungeons (id, name, expansion, is_raid, group_size, min_level, max_level, parent_zone_id)
+        VALUES (721, 'Gnomeregan', 'classic', 0, '5-man', 24, 34, 1)
+        """
+    )
+    # Raid with NULL min_level and max_level
+    conn.execute(
+        """
+        INSERT INTO dungeons (id, name, expansion, is_raid, group_size, min_level, max_level, parent_zone_id)
+        VALUES (2159, 'Onyxia Lair', 'classic', 1, '40-man', NULL, NULL, 15)
+        """
+    )
+    conn.commit()
+
+    cur = conn.execute("SELECT * FROM v_dungeons WHERE id = 721")
+    gnom = cur.fetchone()
+    assert gnom["level_range"] == "24-34"
+    assert gnom["parent_zone_name"] == "Dun Morogh"
+
+    cur = conn.execute("SELECT * FROM v_dungeons WHERE id = 2159")
+    ony = cur.fetchone()
+    assert ony["level_range"] == "N/A"
+    assert ony["meeting_stone_name"] is None
+    assert ony["is_raid"] == 1
 
     conn.close()
 
@@ -71,5 +143,74 @@ def test_views_empty_and_insert(tmp_path):
     assert s["name"] == "Jitters"
     assert s["zone_name"] == "Elwynn Forest"
     assert s["x"] == 45.5
+
+    conn.close()
+
+
+def test_dungeons_schema_and_cascade_delete(tmp_path):
+    db_path = tmp_path / "test_dungeons.db"
+    conn = init_db(db_path)
+
+    conn.execute("INSERT INTO zones (id, name) VALUES (130, 'Silverpine Forest')")
+    conn.execute("INSERT INTO zones (id, name) VALUES (209, 'Shadowfang Keep')")
+    conn.execute(
+        """
+        INSERT INTO dungeons (id, name, expansion, is_raid, group_size, min_level, max_level, parent_zone_id)
+        VALUES (209, 'Shadowfang Keep', 'classic', 0, '5-man', 18, 26, 130)
+        """
+    )
+    conn.execute(
+        "INSERT INTO dungeon_locations (dungeon_id, zone_id, x, y, notes) VALUES (209, 130, 44.8, 67.8, '')"
+    )
+    conn.commit()
+
+    # Verify inserted
+    cur = conn.execute("SELECT COUNT(*) FROM dungeon_locations WHERE dungeon_id = 209")
+    assert cur.fetchone()[0] == 1
+
+    # Cascade delete when dungeon is deleted
+    conn.execute("DELETE FROM dungeons WHERE id = 209")
+    conn.commit()
+    cur = conn.execute("SELECT COUNT(*) FROM dungeon_locations WHERE dungeon_id = 209")
+    assert cur.fetchone()[0] == 0
+
+    conn.close()
+
+
+def test_v_dungeons_null_safe(tmp_path):
+    db_path = tmp_path / "test_v_dungeons.db"
+    conn = init_db(db_path)
+
+    conn.execute("INSERT INTO zones (id, name) VALUES (1, 'Dun Morogh')")
+    conn.execute("INSERT INTO zones (id, name) VALUES (721, 'Gnomeregan')")
+    conn.execute("INSERT INTO zones (id, name) VALUES (15, 'Dustwallow Marsh')")
+    conn.execute("INSERT INTO zones (id, name) VALUES (2159, 'Onyxia Lair')")
+
+    # Dungeon with min_level and max_level
+    conn.execute(
+        """
+        INSERT INTO dungeons (id, name, expansion, is_raid, group_size, min_level, max_level, parent_zone_id)
+        VALUES (721, 'Gnomeregan', 'classic', 0, '5-man', 24, 34, 1)
+        """
+    )
+    # Raid with NULL min_level and max_level
+    conn.execute(
+        """
+        INSERT INTO dungeons (id, name, expansion, is_raid, group_size, min_level, max_level, parent_zone_id)
+        VALUES (2159, 'Onyxia Lair', 'classic', 1, '40-man', NULL, NULL, 15)
+        """
+    )
+    conn.commit()
+
+    cur = conn.execute("SELECT * FROM v_dungeons WHERE id = 721")
+    gnom = cur.fetchone()
+    assert gnom["level_range"] == "24-34"
+    assert gnom["parent_zone_name"] == "Dun Morogh"
+
+    cur = conn.execute("SELECT * FROM v_dungeons WHERE id = 2159")
+    ony = cur.fetchone()
+    assert ony["level_range"] == "N/A"
+    assert ony["meeting_stone_name"] is None
+    assert ony["is_raid"] == 1
 
     conn.close()
