@@ -47,6 +47,8 @@ def get_db_stats(conn: sqlite3.Connection) -> Dict[str, int]:
         "item_drops",
         "item_vendors",
         "zones",
+        "dungeons",
+        "dungeon_locations",
         "areatriggers",
         "meta",
         "minimap",

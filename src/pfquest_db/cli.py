@@ -287,7 +287,7 @@ def cmd_export_questie(args) -> int:
     db_path = _require_existing_db(args.db)
     conn = get_connection(db_path, create=False)
     print(f"Exporting Questie [{args.flavor}] data from: {db_path} -> {args.dest}")
-    export_questie(conn, args.dest, flavor=args.flavor)
+    export_questie(conn, args.dest, flavor=args.flavor, dungeons_only=args.dungeons_only)
     conn.close()
     print(f"Export complete to: {args.dest}")
     return 0
@@ -634,6 +634,7 @@ def main(argv=None) -> int:
     p_exp_qst.add_argument("--db", default=None, help="Path to SQLite database (default: ref/{flavor}.db)")
     p_exp_qst.add_argument("--dest", required=True, help="Path to output directory")
     p_exp_qst.add_argument("--flavor", default="wotlk", help="Questie database flavor prefix (e.g. wotlk)")
+    p_exp_qst.add_argument("--dungeons-only", action="store_true", help="Only export dungeon and meeting stone tables")
     p_exp_qst.set_defaults(func=cmd_export_questie)
 
     # diff

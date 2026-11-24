@@ -1,5 +1,6 @@
 """Questie Lua database exporter."""
 
+import re
 import sqlite3
 from pathlib import Path
 from pfquest_db._lua import _lua_str
@@ -52,17 +53,306 @@ def _top_zone(spawn_map: dict[int, dict[int, list]], ids: list[int] | None) -> i
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
 
+QUESTIE_ZONE_ALIASES = {
+    1585: 1584,  # Blazing Fireguard / BRD subzone mapped to Blackrock Depths
+}
+
+# Non-dungeon world locations that Questie tracks entrance pins for in dungeonLocations
+QUESTIE_EXTRA_DUNGEON_LOCATIONS = {
+    2257: [(1519, 72.0, 28.0), (1537, 84.1, 53.1)],  # Deeprun Tram (Stormwind, Ironforge)
+    2597: [(36, 66.6, 51.3)],                         # Alterac Valley (Alterac Mountains)
+    2917: [(1637, 40.4, 68.3)],                       # Hall of Legends (Orgrimmar)
+    2918: [(1519, 72.7, 54.0)],                       # Champions' Hall (Stormwind)
+}
+
+# Subzone aliases for dungeon entrance pins
+QUESTIE_LOCATION_ALIASES = {
+    1417: 1477,  # Sunken Temple subzone mapped to The Temple of Atal'Hakkar
+}
+
+
+def _export_meeting_stones(conn: sqlite3.Connection, addon_root: Path) -> None:
+    ms_file = addon_root / "Database" / "MeetingStones.lua"
+    menu_ms_file = addon_root / "Modules" / "QuestieMenu" / "MeetingStones.lua"
+
+    cur = conn.execute("""
+        SELECT meeting_stone_id, name, min_level, max_level
+        FROM dungeons
+        WHERE meeting_stone_id IS NOT NULL
+        ORDER BY meeting_stone_id
+    """)
+    stone_rows = cur.fetchall()
+
+    named_stones = []
+    all_stone_ids = []
+    for ms_id, d_name, min_lvl, max_lvl in stone_rows:
+        all_stone_ids.append(ms_id)
+        if min_lvl is not None and max_lvl is not None:
+            if min_lvl == max_lvl:
+                rng = f"({min_lvl})"
+            else:
+                rng = f"({min_lvl}-{max_lvl})"
+        elif min_lvl is not None:
+            rng = f"({min_lvl})"
+        else:
+            rng = "(1-60)"
+        named_stones.append((ms_id, d_name, rng))
+
+    if ms_file.parent.is_dir():
+        lua_entries = []
+        for oid, d_name, rng in named_stones:
+            lua_entries.append(f'    [{oid}] = {{\n        name = {_lua_str(d_name)},\n        range = {_lua_str(rng)}\n    }},')
+        entries_block = "\n".join(lua_entries)
+
+        aliases_lua = """        local aliases = {
+            ["Temple of Ahn'Qiraj"] = "Ahn'Qiraj",
+        }"""
+
+        # Supplemental ranges for instances without physical meeting stones
+        cur_sup = conn.execute("""
+            SELECT name, min_level, max_level
+            FROM dungeons
+            WHERE meeting_stone_id IS NULL AND min_level IS NOT NULL
+            ORDER BY id
+        """)
+        sup_entries = []
+        for d_name, min_lvl, max_lvl in cur_sup.fetchall():
+            if min_lvl == max_lvl:
+                r_str = f"({min_lvl})"
+            else:
+                r_str = f"({min_lvl}-{max_lvl})"
+            sup_entries.append(f'            [{_lua_str(d_name)}] = {_lua_str(r_str)},')
+        sup_block = "        local supplementalRanges = {\n" + "\n".join(sup_entries) + "\n        }"
+
+        ms_content = f"""---@class MeetingStones
+local MeetingStones = QuestieLoader:CreateModule("MeetingStones")
+local _MeetingStones = {{}}
+
+---@type l10n
+local l10n = QuestieLoader:ImportModule("l10n")
+
+--- COMPATIBILITY ---
+local strlower = string.lower
+
+local function _NormalizeMeetingStoneName(name)
+    if not name then
+        return nil
+    end
+
+    return strlower(name)
+end
+
+
+---@param objectId number
+---@return string?, string?
+function MeetingStones:GetLocalizedDungeonNameAndLevelRangeByObjectId(objectId)
+    local tableEntry = _MeetingStones.levelRanges[objectId]
+
+    if (not tableEntry) then
+        return nil, nil
+    end
+
+    return l10n(tableEntry.name), tableEntry.range
+end
+
+---@param dungeonName string
+---@return string?
+function MeetingStones:GetLevelRangeByDungeonName(dungeonName)
+    if not dungeonName then
+        return nil
+    end
+
+    if not _MeetingStones.levelRangesByName then
+        _MeetingStones.levelRangesByName = {{}}
+
+        for _, tableEntry in pairs(_MeetingStones.levelRanges) do
+            _MeetingStones.levelRangesByName[_NormalizeMeetingStoneName(tableEntry.name)] = tableEntry.range
+        end
+
+{sup_block}
+
+{aliases_lua}
+
+        for instanceName, levelRange in pairs(supplementalRanges) do
+            _MeetingStones.levelRangesByName[_NormalizeMeetingStoneName(instanceName)] = levelRange
+        end
+
+        for aliasName, sourceName in pairs(aliases) do
+            local range = _MeetingStones.levelRangesByName[_NormalizeMeetingStoneName(sourceName)]
+            if range then
+                _MeetingStones.levelRangesByName[_NormalizeMeetingStoneName(aliasName)] = range
+            end
+        end
+    end
+
+    return _MeetingStones.levelRangesByName[_NormalizeMeetingStoneName(dungeonName)]
+end
+
+_MeetingStones.levelRanges = {{
+{entries_block}
+}}
+"""
+        ms_file.write_text(ms_content, encoding="utf-8")
+
+    if menu_ms_file.parent.is_dir():
+        id_lines = ",\n    ".join(str(i) for i in all_stone_ids)
+        menu_content = f"""---@type Townsfolk
+local Townsfolk = QuestieLoader:ImportModule("Townsfolk")
+
+local meetingStones = {{
+    {id_lines}
+}}
+
+function Townsfolk.GetMeetingStones()
+    return meetingStones
+end
+"""
+        menu_ms_file.write_text(menu_content, encoding="utf-8")
+
+
+def _update_zone_tables_and_instances(conn: sqlite3.Connection, addon_root: Path) -> None:
+    zone_tables_file = addon_root / "Database" / "Zones" / "zoneTables.lua"
+    if zone_tables_file.is_file():
+        content = zone_tables_file.read_text(encoding="utf-8")
+
+        # Query all dungeons
+        cur = conn.execute("SELECT id, name, subzone_id, parent_zone_id FROM dungeons ORDER BY id")
+        dungeons = {row[0]: {"name": row[1], "subzone_id": row[2], "parent_zone_id": row[3]} for row in cur.fetchall()}
+
+        # Apply aliases for zoneTables (e.g. 1585 -> 1584)
+        for alias_id, target_id in QUESTIE_ZONE_ALIASES.items():
+            if target_id in dungeons and alias_id not in dungeons:
+                dungeons[alias_id] = dungeons[target_id]
+
+        dungeon_lines = []
+        for did in sorted(dungeons.keys()):
+            d = dungeons[did]
+            sub_str = str(d["subzone_id"]) if d["subzone_id"] is not None else "nil"
+            parent_str = str(d["parent_zone_id"]) if d["parent_zone_id"] is not None else "nil"
+            dungeon_lines.append(f'    [{did}] = {{{_lua_str(d["name"])}, {sub_str}, {parent_str}}},')
+
+        new_dungeons = "ZoneDB.private.dungeons = {\n" + "\n".join(dungeon_lines) + "\n}"
+
+        # Query dungeon entrance locations
+        cur = conn.execute("""
+            SELECT dungeon_id, zone_id, x, y
+            FROM dungeon_locations
+            ORDER BY dungeon_id, id
+        """)
+        locations: dict[int, list[tuple[int, float, float]]] = {}
+        for did, zid, x, y in cur.fetchall():
+            locations.setdefault(did, []).append((zid, x, y))
+
+        # Apply aliases for locations (e.g. 1585 -> 1584, 1417 -> 1477)
+        for alias_id, target_id in {**QUESTIE_ZONE_ALIASES, **QUESTIE_LOCATION_ALIASES}.items():
+            if target_id in locations and alias_id not in locations:
+                locations[alias_id] = locations[target_id]
+
+        # Preserve non-dungeon world locations (filtered to zones in DB)
+        valid_zones = {row[0] for row in conn.execute("SELECT id FROM zones").fetchall()}
+        for loc_id, coords in QUESTIE_EXTRA_DUNGEON_LOCATIONS.items():
+            if loc_id in valid_zones and loc_id not in locations:
+                filtered = [c for c in coords if c[0] in valid_zones]
+                if filtered:
+                    locations[loc_id] = filtered
+
+        location_lines = []
+        for did in sorted(locations.keys()):
+            coords_str = ", ".join(f"{{{zid}, {x}, {y}}}" for zid, x, y in locations[did])
+            location_lines.append(f"    [{did}] = {{{coords_str}}},")
+
+        new_locations = "ZoneDB.private.dungeonLocations = {\n" + "\n".join(location_lines) + "\n}"
+
+        content, n = re.subn(r"ZoneDB\.private\.dungeons\s*=\s*\{(?:\s*\}|.*?\n\})", new_dungeons, content, count=1, flags=re.DOTALL)
+        assert n == 1, f"Failed to replace ZoneDB.private.dungeons in {zone_tables_file}"
+        content, n = re.subn(r"ZoneDB\.private\.dungeonLocations\s*=\s*\{(?:\s*\}|.*?\n\})", new_locations, content, count=1, flags=re.DOTALL)
+        assert n == 1, f"Failed to replace ZoneDB.private.dungeonLocations in {zone_tables_file}"
+        zone_tables_file.write_text(content, encoding="utf-8")
+
+    instance_loc_file = addon_root / "Modules" / "Map" / "InstanceLocations.lua"
+    if instance_loc_file.is_file():
+        content = instance_loc_file.read_text(encoding="utf-8")
+
+        cur = conn.execute("SELECT id, name, group_size FROM dungeons WHERE is_raid = 1 ORDER BY id")
+        raids = cur.fetchall()
+
+        size_lines = [f'    [{r[0]}] = {_lua_str(r[2])},    -- {r[1]}' for r in raids]
+        new_sizes = "local RAID_GROUP_SIZES = {\n" + "\n".join(size_lines) + "\n}"
+
+        id_lines = [f'    [{r[0]}] = true, -- {r[1]}' for r in raids]
+        new_ids = "local RAID_AREA_IDS = {\n" + "\n".join(id_lines) + "\n}"
+
+        content, n = re.subn(r"local RAID_GROUP_SIZES\s*=\s*\{(?:\s*\}|.*?\n\})", new_sizes, content, count=1, flags=re.DOTALL)
+        assert n == 1, f"Failed to replace RAID_GROUP_SIZES in {instance_loc_file}"
+        content, n = re.subn(r"local RAID_AREA_IDS\s*=\s*\{(?:\s*\}|.*?\n\})", new_ids, content, count=1, flags=re.DOTALL)
+        assert n == 1, f"Failed to replace RAID_AREA_IDS in {instance_loc_file}"
+        instance_loc_file.write_text(content, encoding="utf-8")
+
+
+def _bump_questie_compiler_version(addon_root: Path) -> None:
+    compiler_file = addon_root / "Database" / "compiler.lua"
+    if not compiler_file.is_file():
+        return
+    text = compiler_file.read_text(encoding="utf-8")
+    m = re.search(r"QuestieDBCompiler\.compiledSchemaVersion\s*=\s*(\d+)", text)
+    if m:
+        curr_ver = int(m.group(1))
+        next_ver = curr_ver + 1
+        new_text = re.sub(
+            r"QuestieDBCompiler\.compiledSchemaVersion\s*=\s*\d+",
+            f"QuestieDBCompiler.compiledSchemaVersion = {next_ver}",
+            text,
+            count=1,
+        )
+        compiler_file.write_text(new_text, encoding="utf-8")
+
+
 def export_questie(
     conn: sqlite3.Connection,
     output_dir: str | Path,
     flavor: str = "wotlk",
+    dungeons_only: bool = False,
 ) -> None:
     """Export SQLite tables to Questie database files in output_dir."""
     out_path = Path(output_dir)
-    target_dir = out_path / "Wotlk" if flavor == "wotlk" else out_path
+
+    is_questie_addon = False
+    addon_root: Path | None = None
+
+    if (out_path / "Database").is_dir() or (out_path / "Questie-335.toc").is_file():
+        is_questie_addon = True
+        addon_root = out_path
+        target_dir = out_path / "Database" / "AzerothCore"
+    elif out_path.name == "AzerothCore" and (out_path.parent / "Zones").is_dir():
+        is_questie_addon = True
+        addon_root = out_path.parent.parent
+        target_dir = out_path
+    else:
+        target_dir = out_path / "Wotlk" if flavor == "wotlk" else out_path
+
+    if dungeons_only:
+        if is_questie_addon and addon_root:
+            _export_meeting_stones(conn, addon_root)
+            _update_zone_tables_and_instances(conn, addon_root)
+        return
+
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    prefix = flavor if flavor else ""
+    # Clean up stale .bak files in target_dir if present
+    for bak in target_dir.glob("*.bak"):
+        bak.unlink(missing_ok=True)
+
+    if is_questie_addon:
+        npc_filename = "acoreNpcDB.lua"
+        obj_filename = "acoreObjectDB.lua"
+        item_filename = "acoreItemDB.lua"
+        quest_filename = "acoreQuestDB.lua"
+    else:
+        prefix = flavor if flavor else ""
+        npc_filename = f"{prefix}NpcDB.lua"
+        obj_filename = f"{prefix}ObjectDB.lua"
+        item_filename = f"{prefix}ItemDB.lua"
+        quest_filename = f"{prefix}QuestDB.lua"
 
     # 1. NPCs (Units)
     cur = conn.execute("SELECT id, name, min_level, max_level, rank, faction, sub_name, npc_flags FROM units ORDER BY id")
@@ -83,7 +373,7 @@ def export_questie(
     for qid, uid in cur.fetchall():
         quest_ends.setdefault(uid, []).append(qid)
 
-    with open(target_dir / f"{prefix}NpcDB.lua", "w", encoding="utf-8") as f:
+    with open(target_dir / npc_filename, "w", encoding="utf-8") as f:
         f.write("---@type QuestieDB\nlocal QuestieDB = QuestieLoader:ImportModule(\"QuestieDB\");\n\n")
         f.write("QuestieDB.npcData = [[return {\n")
         for r in unit_rows:
@@ -117,6 +407,10 @@ def export_questie(
             _trim_trailing_nils(fields)
             f.write(f"[{uid}] = {{{','.join(_serialize_compact(x) for x in fields)}}},\n")
         f.write("}]]\n")
+        f.write("\n-- Generated runtime geometry & event tables\n")
+        f.write("QuestieDB.scriptedSpawnSources = {[32823] = {}, [6492] = {}}\n")
+        f.write("QuestieDB.npcFactionGeometry = {}\n")
+        f.write("QuestieDB.darkmoonGeometry = {[1] = {}, [2] = {}, [3] = {}}\n")
 
     # 2. Objects
     cur = conn.execute("SELECT id, name, faction, faction_id FROM objects ORDER BY id")
@@ -137,7 +431,7 @@ def export_questie(
     for qid, oid in cur.fetchall():
         obj_ends.setdefault(oid, []).append(qid)
 
-    with open(target_dir / f"{prefix}ObjectDB.lua", "w", encoding="utf-8") as f:
+    with open(target_dir / obj_filename, "w", encoding="utf-8") as f:
         f.write("---@type QuestieDB\nlocal QuestieDB = QuestieLoader:ImportModule(\"QuestieDB\");\n\n")
         f.write("QuestieDB.objectData = [[return {\n")
         for r in obj_rows:
@@ -152,6 +446,8 @@ def export_questie(
             _trim_trailing_nils(fields)
             f.write(f"[{oid}] = {{{','.join(_serialize_compact(x) for x in fields)}}},\n")
         f.write("}]]\n")
+        f.write("\n-- Generated object faction geometry\n")
+        f.write("QuestieDB.objectFactionGeometry = {}\n")
 
     # 3. Items
     cur = conn.execute(
@@ -182,7 +478,7 @@ def export_questie(
     for qid, iid in cur.fetchall():
         item_starts[iid] = qid
 
-    with open(target_dir / f"{prefix}ItemDB.lua", "w", encoding="utf-8") as f:
+    with open(target_dir / item_filename, "w", encoding="utf-8") as f:
         f.write("---@type QuestieDB\nlocal QuestieDB = QuestieLoader:ImportModule(\"QuestieDB\");\n\n")
         f.write("QuestieDB.itemData = [[return {\n")
         for r in item_rows:
@@ -217,6 +513,8 @@ def export_questie(
             _trim_trailing_nils(fields)
             f.write(f"[{iid}] = {{{','.join(_serialize_compact(x) for x in fields)}}},\n")
         f.write("}]]\n")
+        f.write("\n-- Generated item faction selections\n")
+        f.write("QuestieDB.itemFactionSelections = {}\n")
 
     # 4. Quests
     cur = conn.execute(
@@ -280,7 +578,7 @@ def export_questie(
     for qid, eq in cur.fetchall():
         exclusives.setdefault(qid, []).append(eq)
 
-    with open(target_dir / f"{prefix}QuestDB.lua", "w", encoding="utf-8") as f:
+    with open(target_dir / quest_filename, "w", encoding="utf-8") as f:
         f.write("---@type QuestieDB\nlocal QuestieDB = QuestieLoader:ImportModule(\"QuestieDB\");\n\n")
         f.write("QuestieDB.questData = [[return {\n")
         for r in quest_rows:
@@ -356,3 +654,11 @@ def export_questie(
             _trim_trailing_nils(fields)
             f.write(f"[{qid}] = {{{','.join(_serialize_compact(x) for x in fields)}}},\n")
         f.write("}]]\n")
+        f.write("\n-- Generated quest faction selections\n")
+        f.write("QuestieDB.questFactionSelections = {}\n")
+
+    # If exporting directly into Questie addon, update all dependent database files
+    if is_questie_addon and addon_root:
+        _export_meeting_stones(conn, addon_root)
+        _update_zone_tables_and_instances(conn, addon_root)
+        _bump_questie_compiler_version(addon_root)
